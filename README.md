@@ -1,0 +1,234 @@
+# Context Fold for OpenCode V2
+
+> [!IMPORTANT]
+> This plugin is built specifically for **OpenCode V2** using the `@opencode/plugin`
+> V2 API. It does not work with OpenCode V1.
+
+An [OpenCode](https://opencode.ai) plugin that lets the model tidy up its own
+context window. When a stretch of conversation is finished — an exploration
+that's done, a long tool output that's been digested — the model can replace it
+with a summary it writes itself. The original is archived and can be pulled
+back with a single call.
+
+No second model, no automatic heuristics. The model decides what to fold and
+what the summary should say.
+
+```
+Model: fold({
+  start:   "Let me look at how the config loader works",
+  end:     "so the loader falls back to defaults.",
+  summary: "Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error."
+})
+→ { id: "3f9a1c2e8b7d6f40", status: "pending", applies: "next_turn", removedChars: 18422 }
+
+… later …
+
+Model: peek({ id: "3f9a1c2e8b7d6f40" })
+→ the full original text of that section
+```
+
+From the next user turn onward, the model sees this in place of the original:
+
+```
+[folded 3f9a1c2e8b7d6f40] Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error. [/folded]
+```
+
+## Why
+
+Long agentic sessions fill up with detail that was essential five minutes ago
+and is noise now: directory listings, file contents that have since been
+edited, dead-end investigations. Built-in compaction handles this by having a
+model summarize *everything* at once when the window is nearly full, which is
+lossy and happens at the worst possible moment.
+
+Folding is incremental and voluntary. The model summarizes a section while it
+still remembers what mattered, keeps the rest of the context untouched, and can
+always get the original back. Session history on disk is never modified; only
+what the model is shown changes.
+
+## Install
+
+Requires OpenCode V2. Tested against 2.0.3.
+
+```sh
+opencode plugin add github:GitMacke/opencode-context-fold
+```
+
+OpenCode installs the package and its dependencies. Pin a tag or branch with
+`#v0.1.0` or `#main` if you want to control updates.
+
+```sh
+opencode plugin check                                          # look for updates
+opencode plugin update github:GitMacke/opencode-context-fold   # apply them
+opencode plugin remove github:GitMacke/opencode-context-fold   # uninstall
+```
+
+### Disable
+
+Prefix the plugin ID with `-` in `opencode.jsonc`, globally
+(`~/.config/opencode/opencode.jsonc`) or in a single project:
+
+```jsonc
+{
+  "plugins": ["-context-fold"]
+}
+```
+
+Remove the entry to re-enable. Fold state stays in plugin storage either way.
+
+### Options
+
+```jsonc
+// opencode.jsonc
+{
+  "plugins": [{
+    "package": "github:GitMacke/opencode-context-fold",
+    "options": {
+      "debug": false
+    }
+  }]
+}
+```
+
+- `debug` (default `false`): write the before/after transcript of every model
+  request to `$TMPDIR/opencode-context-fold/<sessionID>.json`. Useful when
+  diagnosing a fold that didn't apply. **These files contain the full
+  conversation.**
+
+### Local checkout
+
+For development, clone into OpenCode's global plugin directory instead. Plugins
+there are discovered automatically and are not managed by `opencode plugin`.
+
+```sh
+git clone https://github.com/GitMacke/opencode-context-fold ~/.config/opencode/plugins/context-fold
+cd ~/.config/opencode/plugins/context-fold
+bun install
+```
+
+Don't combine this with the `opencode plugin add` install; you'd load two copies.
+
+## How it works
+
+### Tools
+
+**`fold({ start, end, summary })`** — `start` and `end` are exact quotes from
+visible conversation text (message prose or tool output). Each must match
+exactly once; if not, the error tells you how many matches there are and shows
+excerpts so you can lengthen the quote. The selection is inclusive of both
+anchors and may span many messages, including whole tool calls with their
+results, reasoning blocks, and images. The fold is validated immediately and
+returns a 16-character hex ID.
+
+**`peek({ id })`** — returns the archived content of a fold, with role and tool
+labels. Images come back as ordinary file attachments. Reasoning is never
+archived or returned. Peek results are themselves shortened on the next user
+turn to keep the tail of the context small; call `peek` again if you need it
+back.
+
+### Lifecycle
+
+```
+fold() called ──► pending ──► (next real user turn) ──► active
+                     │                                    │
+                     └─► failed (source changed, or       └─► visible as [folded ID] marker
+                         checkpoint appeared)                 until session ends
+```
+
+A fold does **not** take effect in the turn where it's made. It activates on
+the first model request after the assistant finishes its response and the user
+sends a new message. The reason: providers sign reasoning blocks against the
+exact history they saw. Rewriting history mid-response would invalidate those
+signatures and break the request. Deferring to a turn boundary means the model
+finishes its current work with full context, and starts the next turn with the
+folded view.
+
+Activation strips the replay signatures from the reasoning that was generated
+against the old view (from the first affected message onward) and drops the
+obsolete reasoning blocks themselves. Visible text, tool calls, and results
+are all kept. This costs a prompt-cache miss from the fold point forward —
+batching several folds before a turn ends is cheaper than folding one at a
+time across turns.
+
+### Addressing and replay
+
+Folds are stored as stable `(message, part, offset)` ranges plus a SHA-256
+digest of the selected content, not as the quoted strings. On every request the
+plugin replays the fold log onto the current transcript and verifies the
+digest. If the source has changed — an edited message, an upstream transform,
+native compaction — the fold is skipped and its archive stays available through
+`peek`. Quotes are never re-searched, so appending a duplicate of an old
+passage later can't shift an earlier fold.
+
+Folds can nest: fold a region that contains an earlier marker, and the outer
+archive contains the inner marker. Peeking the outer fold reveals the inner ID.
+
+### Selection rules
+
+- Each anchor must match exactly once in visible text and lie within a single
+  text part. Tool-call arguments are not searchable; whole calls may still lie
+  inside a range.
+- A range cannot cross a provider checkpoint (native compaction summary); the
+  error quotes the text just before the checkpoint. A fold also can't be placed
+  before an existing checkpoint. System messages inside a range are kept in
+  place and are not archived.
+- If a range includes a tool call, it must include that call's entire result.
+  Folding only a result (leaving the call outside) is allowed; the result
+  envelope is kept with the summary as its content.
+- The summary plus marker must be shorter than the selected text, unless the
+  range removes an image.
+- Non-overlapping folds from one batch of parallel tool calls all resolve
+  against the same snapshot. Overlapping ones fail rather than silently
+  clobber each other.
+
+### Storage
+
+Per-session state (fold log, archives, tool-call receipts, activation records)
+lives in OpenCode's plugin storage. Tool results are acknowledged only after
+persistence succeeds, so a retried call returns the existing fold rather than
+creating a duplicate. Forked sessions don't inherit folds.
+
+## Limitations
+
+- **Next-turn activation.** Folds never shrink the context of the turn in
+  which they're made. A very long single turn gets no benefit.
+- **Cache miss on activation.** Every activation invalidates the provider
+  prompt cache from the earliest fold point forward.
+- **Provider replay metadata is allow-listed, not understood.** When history
+  before a part changes, its `providerMetadata` is reduced to fields that
+  describe the part itself (`phase`, `type`, `status`, `result`,
+  `annotations`); everything else is assumed to be replay state such as
+  reasoning signatures or item IDs. This was verified against every protocol in
+  `@opencode/ai` 2.0.3 and fails safe: an unknown provider's signature field is
+  dropped and the part replays as fresh, rather than being sent and rejected.
+  OpenCode has no shared helper for this yet; if one appears, use it.
+- **Storage failures degrade, not block.** If plugin storage can't be written
+  during activation, the request is served with the previous (un-activated)
+  view and activation is retried on the next request. Tool calls still fail if
+  their receipt can't be persisted, so retries return the same fold.
+- **External media isn't archived.** Only images with captured bytes (data
+  URIs or raw buffers) can be folded. URL references are refused rather than
+  promising to retrieve a file that may have changed.
+- **Native compaction is a boundary.** Folds on either side of a compaction
+  checkpoint work; folds spanning one don't. The compaction hook shows the
+  summarizer the folded transcript and appends a system instruction asking it
+  to copy `[folded ID]` markers into the checkpoint verbatim so `peek` still
+  works afterward. This is best-effort: nothing forces the summarizer to comply.
+
+## Development
+
+```sh
+bun install
+bun run check      # typecheck + lint + tests
+bun run format     # biome
+```
+
+Layout:
+
+- `core.ts` — view/piece model, anchor resolution, fold application, rendering
+- `lifecycle.ts` — session state, turn-boundary detection, activation
+- `index.ts` — plugin registration, tool definitions, hooks
+
+## License
+
+MIT

@@ -1,0 +1,46 @@
+{
+  "name": "opencode-context-fold",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin: let the model fold finished sections of its own context into summaries it can peek back into later.",
+  "license": "MIT",
+  "homepage": "https://github.com/GitMacke/opencode-context-fold#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GitMacke/opencode-context-fold.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GitMacke/opencode-context-fold/issues"
+  },
+  "type": "module",
+  "exports": "./index.ts",
+  "files": [
+    "index.ts",
+    "core.ts",
+    "lifecycle.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-v2",
+    "opencode-plugin",
+    "context",
+    "summarization"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "check": "bun run typecheck && bun run lint && bun test"
+  },
+  "dependencies": {
+    "@opencode/ai": "2.0.3",
+    "@opencode/plugin": "2.0.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
