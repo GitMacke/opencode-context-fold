@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-fold",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode V2 plugin: let the model fold finished sections of its own context into summaries it can peek back into later.",
   "license": "MIT",
   "homepage": "https://github.com/GitMacke/opencode-context-fold#readme",
