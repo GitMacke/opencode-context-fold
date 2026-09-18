@@ -4,6 +4,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import type { Message } from "@opencode/ai"
 import { Plugin } from "@opencode/plugin"
 import {
   applyFold,
@@ -13,17 +14,28 @@ import {
   hasCheckpointAfter,
   prepareFold,
   render,
+  sameFold,
   type View,
   viewChars,
 } from "./core"
-import { activate, boundary, loadState, project, reserve, type SavedFold, type State } from "./lifecycle"
+import {
+  activate,
+  type Boundary,
+  boundary,
+  loadState,
+  project,
+  readyFolds,
+  reserve,
+  type SavedFold,
+  type State,
+} from "./lifecycle"
 
 interface Runtime {
   state: State
   request?: { original: View; current: View; turn: string }
 }
 
-const foldDescription = `Replace an inclusive section of visible conversation with your concise summary and a retrievable hash marker. You write the summary; no second model is called. Quote unique start and end strings exactly from message text or tool output (each within one text part; lengthen an anchor if it is ambiguous). Both anchors are included. Do not quote guessed tool-call JSON or private reasoning. Anchors and overlap are validated immediately: correct any errors now. Accepted folds are pending until a subsequent real user turn after the current assistant response finishes. Further tool work is allowed; the current response keeps its full context. Ranges may include whole reasoning blocks and captured media, and may span system messages (which stay in place), but cannot cross provider checkpoints or split tool-call/result pairs.
+const foldDescription = `Replace an inclusive section of visible conversation with your concise summary and a retrievable hash marker. You write the summary; no second model is called. Quote unique start and end strings exactly from message text or tool output (each within one text part; lengthen an anchor if it is ambiguous). Both anchors are included. Do not quote guessed tool-call JSON or private reasoning. Anchors and overlap are validated immediately: correct any errors now. Accepted folds are queued and apply as soon as safely possible, before the next model request (including a continuation in the current turn). Further parallel tool work is allowed; the current request keeps its full context. Ranges may include whole reasoning blocks and captured media, and may span system messages (which stay in place), but cannot cross provider checkpoints or split tool-call/result pairs.
 Use when completed exploration or redundant detail can be shortened meaningfully. Preserve conclusions, exact identifiers/paths, user constraints, uncertainties, and unfinished work in the summary. Prefer doing this before your final response to the user, only when useful; then give your final answer normally. Independent, non-overlapping folds may run in parallel. Visible summaries can themselves be folded. peek(id) retrieves visible archived content, including media and nested fold markers, not private reasoning. This changes future context, not stored session history.`
 
 const peekDescription = `Retrieve a folded section by its hash ID, even while it is pending. Returns historical visible text and captured attachments at the end of the conversation, with role/tool labels and any nested fold markers intact. Private reasoning is not returned. The original marker stays in place. Retrieved content remains available until a subsequent user turn after the assistant response finishes, then its tool result is shortened automatically; call peek again if needed. Peek at nested IDs separately for further detail.`
@@ -78,11 +90,39 @@ export default Plugin.define({
       content: JSON.stringify({
         id: fold.id,
         status: fold.status,
-        ...(fold.status === "pending" ? { applies: "next_turn" } : {}),
+        ...(fold.status === "pending" ? { applies: "next_model_request" } : {}),
         removedChars: fold.removedChars,
         ...(fold.error ? { error: fold.error } : {}),
       }),
     })
+
+    async function rewriteRequest(
+      sessionID: string,
+      runtime: Runtime,
+      messages: readonly Message[],
+      turn?: Boundary,
+    ) {
+      const projected = project(messages, runtime.state)
+      const activated = activate(projected.view, runtime.state, turn, readyFolds(messages, runtime.state))
+      let view = projected.view
+      let persisted = activated.state === runtime.state
+      if (!persisted) {
+        try {
+          await save(sessionID, runtime, activated.state)
+          persisted = true
+        } catch (error) {
+          console.warn("context-fold: could not persist fold activation; serving previous view", error)
+        }
+      }
+      if (persisted) {
+        view = activated.view
+        for (const error of activated.errors) {
+          console.warn("context-fold:", error)
+          await ctx.session.synthetic({ sessionID, text: error })
+        }
+      }
+      return { view, skipped: projected.skipped, errors: persisted ? activated.errors : [] }
+    }
 
     await ctx.tool.transform((editor) => {
       editor.add({
@@ -110,8 +150,20 @@ export default Plugin.define({
                 }),
               }
             try {
+              let prepared = prepareFold(runtime.request.original, input as FoldInput)
+              const duplicate = runtime.state.folds.find(
+                (saved) => saved.status !== "failed" && sameFold(saved, prepared),
+              )
+              if (duplicate) return receipt(duplicate)
+              for (
+                let attempt = 1;
+                runtime.state.folds.some((saved) => saved.id === prepared.id);
+                attempt++
+              ) {
+                prepared = prepareFold(runtime.request.original, input as FoldInput, attempt)
+              }
               const fold: SavedFold = {
-                ...prepareFold(runtime.request.original, input as FoldInput),
+                ...prepared,
                 status: "pending",
                 turn: runtime.request.turn,
                 messageID: tool.messageID,
@@ -120,12 +172,10 @@ export default Plugin.define({
                 throw new FoldError(
                   "A provider checkpoint follows the selection; its state cannot be rewritten.",
                 )
-              const duplicate = runtime.state.folds.find((saved) => saved.id === fold.id)
-              if (duplicate && duplicate.status !== "failed") return receipt(duplicate)
               const current = applyFold(runtime.request.current, fold)
               await save(tool.sessionID, runtime, {
                 ...runtime.state,
-                folds: [...runtime.state.folds.filter((saved) => saved.id !== fold.id), fold],
+                folds: [...runtime.state.folds, fold],
                 calls: { ...runtime.state.calls, [tool.id]: fold.id },
               })
               runtime.request.current = current
@@ -141,7 +191,7 @@ export default Plugin.define({
         description: peekDescription,
         input: {
           type: "object",
-          properties: { id: { type: "string", pattern: "^[a-f0-9]{16}$" } },
+          properties: { id: { type: "string", minLength: 1 } },
           required: ["id"],
           additionalProperties: false,
         },
@@ -180,31 +230,12 @@ export default Plugin.define({
       serial(event.sessionID, async (runtime) => {
         const before = event.messages
         const turn = boundary(await ctx.session.context({ sessionID: event.sessionID }))
-        const projected = project(before, runtime.state)
-        const activated = activate(projected.view, runtime.state, turn)
-        let view = projected.view
-        const skipped = projected.skipped
-        // Persist before publishing. If storage is down, serve the previous view
-        // rather than blocking the request; activation is retried next time.
-        let persisted = activated.state === runtime.state
-        if (!persisted) {
-          try {
-            await save(event.sessionID, runtime, activated.state)
-            persisted = true
-          } catch (error) {
-            console.warn("context-fold: could not persist fold activation; serving previous view", error)
-          }
-        }
-        if (persisted) view = activated.view
+        const rewritten = await rewriteRequest(event.sessionID, runtime, before, turn)
+        const { view, skipped } = rewritten
         event.messages = render(view)
         runtime.request = { original: view, current: reserve(view, runtime.state), turn: turn.turn }
         for (const id of skipped)
           console.warn(`context-fold: fold ${id} no longer matches the transcript and was skipped`)
-        if (persisted)
-          for (const error of activated.errors) {
-            console.warn("context-fold:", error)
-            await ctx.session.synthetic({ sessionID: event.sessionID, text: error })
-          }
         if (debug) {
           try {
             await mkdir(dumpDir, { recursive: true })
@@ -242,8 +273,10 @@ export default Plugin.define({
 
     await ctx.session.hook("compaction", (event) =>
       serial(event.sessionID, async (runtime) => {
-        // Auxiliary compaction never activates pending edits or advances a turn.
-        event.messages = render(project(event.messages, runtime.state).view)
+        // Compaction does not advance a user turn, but it is still a model
+        // request and can safely consume folds from a completed tool batch.
+        const rewritten = await rewriteRequest(event.sessionID, runtime, event.messages)
+        event.messages = render(rewritten.view)
         if (runtime.state.folds.some((fold) => fold.status === "active")) {
           event.system.push({
             type: "text",

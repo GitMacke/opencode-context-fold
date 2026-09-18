@@ -19,18 +19,19 @@ Model: fold({
   end:     "so the loader falls back to defaults.",
   summary: "Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error."
 })
-→ { id: "3f9a1c2e8b7d6f40", status: "pending", applies: "next_turn", removedChars: 18422 }
+→ { id: "P5ms2_", status: "pending", applies: "next_model_request", removedChars: 18422 }
 
 … later …
 
-Model: peek({ id: "3f9a1c2e8b7d6f40" })
+Model: peek({ id: "P5ms2_" })
 → the full original text of that section
 ```
 
-From the next user turn onward, the model sees this in place of the original:
+From the next model request onward, including a tool-driven continuation in the
+same user turn, the model sees this in place of the original:
 
 ```
-[folded 3f9a1c2e8b7d6f40] Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error. [/folded]
+[folded P5ms2_] Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error. [/folded]
 ```
 
 ## Why
@@ -97,8 +98,25 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
 
 ### Local checkout
 
-For development, clone into OpenCode's global plugin directory instead. Plugins
-there are discovered automatically and are not managed by `opencode plugin`.
+To test an existing checkout directly, replace the published package entry with
+its absolute directory in `opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{
+    "package": "/absolute/path/to/opencode-context-fold",
+    "options": { "debug": false }
+  }]
+}
+```
+
+Run `bun install` in the checkout, then restart OpenCode's service after source
+changes with `opencode service restart`. Do not keep the GitHub package entry at
+the same time, or two copies of the plugin will load.
+
+Alternatively, clone into OpenCode's global plugin directory. Plugins there are
+discovered automatically and are not managed by `opencode plugin`.
 
 ```sh
 git clone https://github.com/GitMacke/opencode-context-fold ~/.config/opencode/plugins/context-fold
@@ -118,7 +136,7 @@ exactly once; if not, the error tells you how many matches there are and shows
 excerpts so you can lengthen the quote. The selection is inclusive of both
 anchors and may span many messages, including whole tool calls with their
 results, reasoning blocks, and images. The fold is validated immediately and
-returns a 16-character hex ID.
+returns a six-character ID.
 
 **`peek({ id })`** — returns the archived content of a fold, with role and tool
 labels. Images come back as ordinary file attachments. Reasoning is never
@@ -129,19 +147,21 @@ back.
 ### Lifecycle
 
 ```
-fold() called ──► pending ──► (next real user turn) ──► active
+fold() called ──► queued ──► (next model request) ──► active
                      │                                    │
                      └─► failed (source changed, or       └─► visible as [folded ID] marker
                          checkpoint appeared)                 until session ends
 ```
 
-A fold does **not** take effect in the turn where it's made. It activates on
-the first model request after the assistant finishes its response and the user
-sends a new message. The reason: providers sign reasoning blocks against the
-exact history they saw. Rewriting history mid-response would invalidate those
-signatures and break the request. Deferring to a turn boundary means the model
-finishes its current work with full context, and starts the next turn with the
-folded view.
+A fold cannot change a model request that is already in flight. It is queued
+when the tool succeeds, then activates as soon as safely possible: before the
+next model request, including a tool-driven continuation in the same user turn.
+Parallel folds from one tool batch activate together. If there is no
+continuation, the fold naturally waits for the next user turn.
+
+Providers sign reasoning blocks against the exact history they saw. Activation
+therefore strips replay state generated against the old view before dispatching
+the rewritten request.
 
 Activation strips the replay signatures from the reasoning that was generated
 against the old view (from the first affected message onward) and drops the
@@ -190,8 +210,10 @@ creating a duplicate. Forked sessions don't inherit folds.
 
 ## Limitations
 
-- **Next-turn activation.** Folds never shrink the context of the turn in
-  which they're made. A very long single turn gets no benefit.
+- **No in-flight activation.** A fold cannot shrink the model request that
+  produced its tool call. Savings begin with the next model request. If the
+  session becomes idle without another request, the fold remains queued and the
+  existing context indicator will not reflect its eventual savings yet.
 - **Cache miss on activation.** Every activation invalidates the provider
   prompt cache from the earliest fold point forward.
 - **Provider replay metadata is allow-listed, not understood.** When history

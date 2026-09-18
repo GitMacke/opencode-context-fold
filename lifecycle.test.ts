@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { Message } from "@opencode/ai"
 import { createView, prepareFold, render } from "./core"
-import { activate, boundary, loadState, project, type SavedFold } from "./lifecycle"
+import { activate, boundary, loadState, project, readyFolds, type SavedFold } from "./lifecycle"
 
 const input = {
   start: "First episode begins.",
@@ -18,6 +18,11 @@ const reason = (id: string) =>
     content: [
       { type: "reasoning", text: "", providerMetadata: { anthropic: { signature: `secret-${id}` } } },
     ],
+  })
+const toolResult = (id: string) =>
+  Message.make({
+    role: "tool",
+    content: [{ type: "tool-result", id, name: "fold", result: { type: "text", value: "queued" } }],
   })
 const finished = boundary([
   { id: "u1", type: "user" },
@@ -93,6 +98,25 @@ test("later substantive tool work survives, obsolete signatures don't, fresh rea
   expect(replayed.skipped).toEqual([])
   expect(JSON.stringify(render(replayed.view))).toContain("secret-fresh")
   expect(JSON.stringify(render(replayed.view))).not.toContain("secret-later")
+})
+
+test("a completed fold tool result makes a pending fold ready in the same turn", () => {
+  const base = [user("u1"), text("a1", prose)]
+  const fold: SavedFold = {
+    ...prepareFold(createView(base), input),
+    status: "pending",
+    turn: "u1",
+    messageID: "current",
+  }
+  const messages = [...base, toolResult("f1")]
+  const state = { ...loadState(undefined), folds: [fold], calls: { f1: fold.id } }
+  const ready = readyFolds(messages, state)
+  const activated = activate(createView(messages), state, undefined, ready)
+
+  expect(ready).toEqual(new Set([fold.id]))
+  expect(activated.state.folds[0].status).toBe("active")
+  expect(JSON.stringify(render(activated.view))).toContain(`[folded ${fold.id}]`)
+  expect(JSON.stringify(render(activated.view))).not.toContain("Investigated files")
 })
 
 test("nesting after a reset replays onto the same stable source identities", () => {

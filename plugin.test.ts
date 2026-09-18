@@ -18,6 +18,23 @@ const secondInput = {
   summary: "Second finding.",
 }
 const nextMessages = () => [...original(), Message.make({ id: "u2", role: "user", content: "Next question" })]
+const continuation = (calls: string[]) => [
+  ...original(),
+  Message.make({
+    id: "current",
+    role: "assistant",
+    content: calls.map((id) => ({ type: "tool-call" as const, id, name: "fold", input: {} })),
+  }),
+  Message.make({
+    role: "tool",
+    content: calls.map((id) => ({
+      type: "tool-result" as const,
+      id,
+      name: "fold",
+      result: { type: "text" as const, value: "queued" },
+    })),
+  }),
+]
 
 async function harness(storage = new Map<string, unknown>()) {
   const tools = new Map<string, Info>()
@@ -119,6 +136,28 @@ test("parallel tool commits survive reload and peek is session-scoped", async ()
   })
 })
 
+test("parallel folds activate together before a same-turn continuation", async () => {
+  const host = await harness()
+  await host.request()
+  const results = await Promise.all([
+    host.call("fold", firstInput, "f1"),
+    host.call("fold", secondInput, "f2"),
+  ])
+  expect(results.map((result) => JSON.parse(result.content as string).applies)).toEqual([
+    "next_model_request",
+    "next_model_request",
+  ])
+
+  const next = await host.request(continuation(["f1", "f2"]))
+  const output = JSON.stringify(next.messages)
+  expect(output).toContain(JSON.parse(results[0].content as string).id)
+  expect(output).toContain(JSON.parse(results[1].content as string).id)
+  expect(output).not.toContain("Detailed findings")
+  expect(
+    (host.storage.get("sessions/s1") as { folds: { status: string }[] }).folds.map((fold) => fold.status),
+  ).toEqual(["active", "active"])
+})
+
 test("failed persistence does not publish a fold and the queue recovers", async () => {
   const host = await harness()
   await host.request()
@@ -167,7 +206,7 @@ test("expansion lifetime persists across plugin reloads", async () => {
   expect(JSON.stringify(next.messages)).not.toContain("historical content")
 })
 
-test("compaction does not activate pending folds; active folds remain summarized", async () => {
+test("compaction without a fold receipt leaves it queued; active folds remain summarized", async () => {
   const host = await harness()
   await host.request()
   const folded = await host.call("fold", firstInput, "f1")
@@ -182,6 +221,19 @@ test("compaction does not activate pending folds; active folds remain summarized
   expect(event.system[0].text).toContain("copying IDs exactly")
 })
 
+test("compaction activates a queued fold when its tool result is present", async () => {
+  const host = await harness()
+  await host.request()
+  const folded = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+
+  const event = await host.request(continuation(["f1"]), "s1", "compaction")
+  const output = JSON.stringify(event.messages)
+  expect(output).toContain(folded.id)
+  expect(output).not.toContain("First episode begins")
+  expect(event.system[0].text).toContain("copying IDs exactly")
+  expect((host.storage.get("sessions/s1") as { folds: { status: string }[] }).folds[0].status).toBe("active")
+})
+
 test("bad anchors fail immediately and can be corrected without waiting a turn", async () => {
   const host = await harness()
   await host.request()
@@ -191,7 +243,7 @@ test("bad anchors fail immediately and can be corrected without waiting a turn",
   ).toContain("not found")
   expect(host.storage.size).toBe(0)
   const valid = JSON.parse((await host.call("fold", firstInput, "good")).content as string)
-  expect(valid).toMatchObject({ status: "pending", applies: "next_turn" })
+  expect(valid).toMatchObject({ status: "pending", applies: "next_model_request" })
   expect(JSON.stringify((await host.request()).messages)).toContain(prose)
 })
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Queue accepted folds and activate them before the next model request,
+  including tool-driven continuations in the same user turn.
+- Activate parallel folds together after their tool results enter the model
+  transcript.
+- Shorten new fold IDs to six base64url characters while retaining lookup
+  compatibility with existing IDs.
+
 ## 0.1.0
 
 Initial public release for OpenCode V2.

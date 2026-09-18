@@ -146,21 +146,36 @@ export function reserve(view: View, state: State): View {
   return view
 }
 
+// A successful fold is safe to publish once its tool result is part of the
+// provider-facing transcript. This naturally waits for the tool batch to
+// finish, while still allowing activation before a same-turn continuation.
+export function readyFolds(messages: readonly Message[], state: State): Set<string> {
+  const results = new Set(
+    messages.flatMap((message) =>
+      message.content.flatMap((part) => (part.type === "tool-result" ? [part.id] : [])),
+    ),
+  )
+  return new Set(
+    Object.entries(state.calls).flatMap(([callID, foldID]) => (results.has(callID) ? [foldID] : [])),
+  )
+}
+
 export function activate(
   view: View,
   state: State,
-  turn: Boundary,
+  turn?: Boundary,
+  ready: ReadonlySet<string> = new Set(),
 ): { state: State; view: View; errors: string[] } {
-  if (!turn.closed) return { state, view, errors: [] }
   let current = view
   let earliest = view.length
   const errors: string[] = []
   const accepted: string[] = []
   const folds = state.folds.map((fold): SavedFold => {
-    if (fold.status !== "pending" || fold.turn === turn.turn) return fold
+    if (fold.status !== "pending") return fold
+    const completedAtBoundary =
+      !!turn?.closed && fold.turn !== turn.turn && !!fold.messageID && turn.completed.has(fold.messageID)
+    if (!ready.has(fold.id) && !completedAtBoundary) return fold
     try {
-      if (!fold.messageID || !turn.completed.has(fold.messageID))
-        throw new FoldError("Originating tool call is no longer in completed history.")
       const start = foldStart(view, fold)
       if (hasCheckpointAfter(view, start))
         throw new FoldError("A provider checkpoint follows the selection; its state cannot be rewritten.")
@@ -176,9 +191,11 @@ export function activate(
       return { ...fold, status: "failed", error: error.message }
     }
   })
-  const peeks = Object.entries(state.expansions)
-    .filter(([, entry]) => !entry.collapsed && entry.turn !== turn.turn)
-    .map(([id]) => id)
+  const peeks = turn?.closed
+    ? Object.entries(state.expansions)
+        .filter(([, entry]) => !entry.collapsed && entry.turn !== turn.turn)
+        .map(([id]) => id)
+    : []
   const start = peekStart(view, peeks)
   // Keep the attachment available if shortening it would rewrite native state.
   const shortened = hasCheckpointAfter(view, start) ? [] : peeks

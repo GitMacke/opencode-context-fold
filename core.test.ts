@@ -39,6 +39,7 @@ describe("fold addressing and replay", () => {
     const before = JSON.stringify(messages)
     const view = createView(messages)
     const fold = prepareFold(view, input)
+    expect(fold.id).toMatch(/^[A-Za-z0-9_-]{6}$/)
     const result = render(applyFold(view, fold))
     expect(result[0].role).toBe("assistant")
     expect(flatten(result)).toContain(`PREFIX [folded ${fold.id}]`)

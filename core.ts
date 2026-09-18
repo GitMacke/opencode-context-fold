@@ -52,6 +52,17 @@ export interface FoldInput {
 }
 export class FoldError extends Error {}
 
+export function sameFold(left: Fold, right: Fold): boolean {
+  return (
+    left.digest === right.digest &&
+    left.summary === right.summary &&
+    left.start.source === right.start.source &&
+    left.start.offset === right.start.offset &&
+    left.end.source === right.end.source &&
+    left.end.offset === right.end.offset
+  )
+}
+
 function hash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex")
 }
@@ -284,7 +295,7 @@ function mediaFile(part: Extract<ContentPart, { type: "media" }>): ArchiveConten
   }
 }
 
-export function prepareFold(view: View, input: FoldInput): Fold {
+export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
   if (!input.summary.trim()) throw new FoldError("summary must be non-empty.")
   const start = anchor(view, input.start, "start").start
   const end = anchor(view, input.end, "end").end
@@ -292,7 +303,9 @@ export function prepareFold(view: View, input: FoldInput): Fold {
   const summary = input.summary.trim()
   const first = pointAt(view[start.block], start.offset, false)
   const last = pointAt(view[end.block], end.offset, true)
-  const id = hash([first, last, selected.digest, summary]).slice(0, 16)
+  const id = Buffer.from(hash([first, last, selected.digest, summary, attempt]), "hex")
+    .toString("base64url")
+    .slice(0, 6)
   const removedChars = selected.chars - marker({ id, summary }).length
   const hasMedia = selected.archive.some((item) => item.type === "file")
   if (removedChars <= 0 && !hasMedia)
