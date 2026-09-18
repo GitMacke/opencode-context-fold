@@ -115,6 +115,7 @@ test("a completed fold tool result makes a pending fold ready in the same turn",
 
   expect(ready).toEqual(new Set([fold.id]))
   expect(activated.state.folds[0].status).toBe("active")
+  expect(activated.activated).toEqual([fold.id])
   expect(JSON.stringify(render(activated.view))).toContain(`[folded ${fold.id}]`)
   expect(JSON.stringify(render(activated.view))).not.toContain("Investigated files")
 })

@@ -29,10 +29,30 @@ import {
   type SavedFold,
   type State,
 } from "./lifecycle"
+import { ContextFoldRpc } from "./rpc"
 
 interface Runtime {
   state: State
   request?: { original: View; current: View; turn: string }
+}
+
+interface NotificationOptions {
+  enabled: boolean
+  duration: number
+}
+
+function notificationOptions(value: unknown): NotificationOptions {
+  if (value === false) return { enabled: false, duration: 4_000 }
+  if (!value || typeof value !== "object") return { enabled: true, duration: 4_000 }
+  const options = value as { enabled?: unknown; duration?: unknown }
+  const duration =
+    typeof options.duration === "number" &&
+    Number.isInteger(options.duration) &&
+    options.duration >= 1 &&
+    options.duration <= 60_000
+      ? options.duration
+      : 4_000
+  return { enabled: options.enabled !== false, duration }
 }
 
 const foldDescription = `Replace an inclusive section of visible conversation with your concise summary and a retrievable hash marker. You write the summary; no second model is called. Quote unique start and end strings exactly from message text or tool output (each within one text part; lengthen an anchor if it is ambiguous). Both anchors are included. Do not quote guessed tool-call JSON or private reasoning. Anchors and overlap are validated immediately: correct any errors now. Accepted folds are queued and apply as soon as safely possible, before the next model request (including a continuation in the current turn). Further parallel tool work is allowed; the current request keeps its full context. Ranges may include whole reasoning blocks and captured media, and may span system messages (which stay in place), but cannot cross provider checkpoints or split tool-call/result pairs.
@@ -46,7 +66,9 @@ export default Plugin.define({
     const sessions = new Map<string, Promise<Runtime>>()
     const queues = new Map<string, Promise<void>>()
     const debug = ctx.options.debug === true
+    const notifications = notificationOptions(ctx.options.notifications)
     const dumpDir = path.join(os.tmpdir(), "opencode-context-fold")
+    const rpc = await ctx.rpc.register(ContextFoldRpc, {})
 
     function load(sessionID: string): Promise<Runtime> {
       let pending = sessions.get(sessionID)
@@ -103,6 +125,7 @@ export default Plugin.define({
       turn?: Boundary,
     ) {
       const projected = project(messages, runtime.state)
+      const beforeChars = viewChars(projected.view)
       const activated = activate(projected.view, runtime.state, turn, readyFolds(messages, runtime.state))
       let view = projected.view
       let persisted = activated.state === runtime.state
@@ -116,6 +139,21 @@ export default Plugin.define({
       }
       if (persisted) {
         view = activated.view
+        if (notifications.enabled && activated.activated.length) {
+          const activatedIDs = new Set(activated.activated)
+          const removedChars = activated.state.folds
+            .filter((fold) => activatedIDs.has(fold.id))
+            .reduce((total, fold) => total + fold.removedChars, 0)
+          void rpc.events
+            .emit("foldsActivated", {
+              sessionID,
+              count: activated.activated.length,
+              removedChars,
+              beforeChars,
+              duration: notifications.duration,
+            })
+            .catch((error) => console.warn("context-fold: could not send fold notification", error))
+        }
         for (const error of activated.errors) {
           console.warn("context-fold:", error)
           await ctx.session.synthetic({ sessionID, text: error })
@@ -286,8 +324,9 @@ export default Plugin.define({
       }),
     )
 
-    return () => {
+    return async () => {
       sessions.clear()
+      await rpc.dispose()
     }
   },
 })

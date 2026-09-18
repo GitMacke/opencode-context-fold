@@ -36,14 +36,18 @@ const continuation = (calls: string[]) => [
   }),
 ]
 
-async function harness(storage = new Map<string, unknown>()) {
+async function harness(
+  storage = new Map<string, unknown>(),
+  options: Record<string, unknown> = { debug: false },
+) {
   const tools = new Map<string, Info>()
   const hooks = new Map<string, (event: SessionContextHook) => void | Promise<void>>()
   let failWrites = false
   let durable: unknown[] = [{ type: "user", id: "u1" }]
   const notices: string[] = []
+  const events: { name: string; data: unknown }[] = []
   const cleanup = await plugin.setup({
-    options: { debug: false },
+    options,
     location: { directory: "/unused" },
     storage: {
       get: async (key: string) => storage.get(key),
@@ -55,6 +59,16 @@ async function harness(storage = new Map<string, unknown>()) {
     tool: {
       transform: async (callback: (editor: { add: (tool: Info) => void }) => void) =>
         callback({ add: (tool) => tools.set(tool.name, tool) }),
+    },
+    rpc: {
+      register: async () => ({
+        events: {
+          emit: async (name: string, data: unknown) => {
+            events.push({ name, data })
+          },
+        },
+        dispose: async () => {},
+      }),
     },
     session: {
       context: async () => durable,
@@ -70,6 +84,7 @@ async function harness(storage = new Map<string, unknown>()) {
     storage,
     cleanup,
     notices,
+    events,
     history: (items: unknown[]) => {
       durable = items
     },
@@ -156,6 +171,37 @@ test("parallel folds activate together before a same-turn continuation", async (
   expect(
     (host.storage.get("sessions/s1") as { folds: { status: string }[] }).folds.map((fold) => fold.status),
   ).toEqual(["active", "active"])
+  expect(host.events).toEqual([
+    {
+      name: "foldsActivated",
+      data: expect.objectContaining({
+        sessionID: "s1",
+        count: 2,
+        removedChars: expect.any(Number),
+        beforeChars: expect.any(Number),
+        duration: 4_000,
+      }),
+    },
+  ])
+})
+
+test("fold activation notifications can be disabled", async () => {
+  const host = await harness(new Map(), { notifications: false })
+  await host.request()
+  await host.call("fold", firstInput, "f1")
+  await host.request(continuation(["f1"]))
+  expect(host.events).toEqual([])
+})
+
+test("fold activation notifications accept a custom duration", async () => {
+  const host = await harness(new Map(), { notifications: { duration: 7_500 } })
+  await host.request()
+  await host.call("fold", firstInput, "f1")
+  await host.request(continuation(["f1"]))
+  expect(host.events[0]).toEqual({
+    name: "foldsActivated",
+    data: expect.objectContaining({ count: 1, duration: 7_500 }),
+  })
 })
 
 test("failed persistence does not publish a fold and the queue recovers", async () => {
@@ -288,6 +334,7 @@ test("activation failure leaves original text and provides a persistent notice",
   ]
   expect(JSON.stringify((await host.request(changed)).messages)).toContain("Edited historical text")
   expect(host.notices).toHaveLength(1)
+  expect(host.events).toHaveLength(0)
   expect(host.notices[0]).toContain("not applied")
   await host.request(changed)
   expect(host.notices).toHaveLength(1)
@@ -302,8 +349,10 @@ test("activation persists before changing the outgoing history; storage failure 
   const degraded = await host.request(nextMessages())
   expect(JSON.stringify(degraded.messages)).toContain("First episode begins")
   expect(host.notices).toHaveLength(0)
+  expect(host.events).toHaveLength(0)
   host.failWrites(false)
   expect(JSON.stringify((await host.request(nextMessages())).messages)).not.toContain("First episode begins")
+  expect(host.events).toHaveLength(1)
 })
 
 test("pending peek returns captured media via ordinary tool file content", async () => {

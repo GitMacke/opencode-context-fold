@@ -8,6 +8,8 @@
   transcript.
 - Shorten new fold IDs to six base64url characters while retaining lookup
   compatibility with existing IDs.
+- Show a configurable TUI success toast after persisted fold activation,
+  aggregating parallel folds and reporting their character reduction.
 
 ## 0.1.0
 

@@ -85,7 +85,12 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
   "plugins": [{
     "package": "github:GitMacke/opencode-context-fold",
     "options": {
-      "debug": false
+      "debug": false,
+      // Show a success toast when queued folds become active.
+      "notifications": {
+        "enabled": true,
+        "duration": 4000
+      }
     }
   }]
 }
@@ -95,6 +100,11 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
   request to `$TMPDIR/opencode-context-fold/<sessionID>.json`. Useful when
   diagnosing a fold that didn't apply. **These files contain the full
   conversation.**
+- `notifications` (default enabled): show a TUI success toast when folds become
+  active, with the exact character reduction and its share of the preceding
+  visible context. Parallel folds produce one combined toast. Set this to
+  `false` to disable notifications, or set `enabled` and `duration` (milliseconds)
+  in the object form shown above.
 
 ### Local checkout
 
@@ -158,6 +168,11 @@ when the tool succeeds, then activates as soon as safely possible: before the
 next model request, including a tool-driven continuation in the same user turn.
 Parallel folds from one tool batch activate together. If there is no
 continuation, the fold naturally waits for the next user turn.
+
+On activation, the bundled TUI companion shows one non-blocking success toast
+with the reduction in visible text. Notifications are emitted only after the
+new fold state is persisted; notification delivery is best-effort and cannot
+block folding or model dispatch.
 
 Providers sign reasoning blocks against the exact history they saw. Activation
 therefore strips replay state generated against the old view before dispatching

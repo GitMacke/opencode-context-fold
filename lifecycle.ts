@@ -165,7 +165,7 @@ export function activate(
   state: State,
   turn?: Boundary,
   ready: ReadonlySet<string> = new Set(),
-): { state: State; view: View; errors: string[] } {
+): { state: State; view: View; errors: string[]; activated: string[] } {
   let current = view
   let earliest = view.length
   const errors: string[] = []
@@ -200,7 +200,8 @@ export function activate(
   // Keep the attachment available if shortening it would rewrite native state.
   const shortened = hasCheckpointAfter(view, start) ? [] : peeks
   if (shortened.length) earliest = Math.min(earliest, start)
-  if (!accepted.length && !shortened.length && !errors.length) return { state, view, errors }
+  if (!accepted.length && !shortened.length && !errors.length)
+    return { state, view, errors, activated: accepted }
   const reset = resetFrom(view, earliest)
   const rewrite: Rewrite = { folds: accepted, peeks: shortened, reset }
   const expansions = { ...state.expansions }
@@ -214,5 +215,6 @@ export function activate(
     },
     view: resetView(collapsePeekView(current, shortened), reset),
     errors,
+    activated: accepted,
   }
 }
