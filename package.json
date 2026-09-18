@@ -21,6 +21,8 @@
     "index.ts",
     "core.ts",
     "lifecycle.ts",
+    "nudge.ts",
+    "prompts.ts",
     "rpc.ts",
     "tui.ts",
     "README.md",

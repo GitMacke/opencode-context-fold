@@ -10,7 +10,7 @@ that's done, a long tool output that's been digested — the model can replace i
 with a summary it writes itself. The original is archived and can be pulled
 back with a single call.
 
-No second model, no automatic heuristics. The model decides what to fold and
+No second model, no automatic pruning. The model decides what to fold and
 what the summary should say.
 
 ```
@@ -86,6 +86,8 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
     "package": "github:GitMacke/opencode-context-fold",
     "options": {
       "debug": false,
+      // Remind the model to fold as its context grows.
+      "nudges": true,
       // Show a success toast when queued folds become active.
       "notifications": {
         "enabled": true,
@@ -105,6 +107,8 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
   visible context. Parallel folds produce one combined toast. Set this to
   `false` to disable notifications, or set `enabled` and `duration` (milliseconds)
   in the object form shown above.
+- `nudges` (default `true`): add a brief model-facing reminder at 60% of the
+  model's context limit, with stronger wording at 80%. Set to `false` to disable.
 
 ### Local checkout
 
@@ -153,6 +157,26 @@ labels. Images come back as ordinary file attachments. Reasoning is never
 archived or returned. Peek results are themselves shortened on the next user
 turn to keep the tail of the context small; call `peek` again if you need it
 back.
+
+### Proactive folding and reminders
+
+The tool descriptions encourage folding after substantial exploration or other
+completed phases, rather than waiting until the final answer. They emphasize
+what to preserve and how to retrieve details, leaving implementation mechanics
+out of the model's instructions. The wording lives in `prompts.ts`.
+
+Reminders use the latest reported usage for the current model, including cached,
+output, and reasoning tokens. This is a lagging pressure signal, not an exact
+token count of the outgoing request; newly added tool output is not yet counted.
+No tokenizer or extra model call is used. If usage or the context limit is
+unavailable, no reminder is added.
+
+Reminders are temporary system instructions, only on ordinary context requests
+where `fold` is available. They skip four fresh model responses between repeats,
+but can escalate immediately from the soft to the strong reminder. A successful
+fold starts a cooldown and suppresses the old usage reading. Usage from before
+native compaction or a model switch is ignored. No reminder is saved in session
+history, and nudges never choose or fold content automatically.
 
 ### Lifecycle
 

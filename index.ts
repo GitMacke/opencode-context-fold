@@ -29,10 +29,13 @@ import {
   type SavedFold,
   type State,
 } from "./lifecycle"
+import { type NudgeState, nudge } from "./nudge"
+import { foldDescription, peekDescription } from "./prompts"
 import { ContextFoldRpc } from "./rpc"
 
 interface Runtime {
   state: State
+  nudge: NudgeState
   request?: { original: View; current: View; turn: string }
 }
 
@@ -55,11 +58,6 @@ function notificationOptions(value: unknown): NotificationOptions {
   return { enabled: options.enabled !== false, duration }
 }
 
-const foldDescription = `Replace an inclusive section of visible conversation with your concise summary and a retrievable hash marker. You write the summary; no second model is called. Quote unique start and end strings exactly from message text or tool output (each within one text part; lengthen an anchor if it is ambiguous). Both anchors are included. Do not quote guessed tool-call JSON or private reasoning. Anchors and overlap are validated immediately: correct any errors now. Accepted folds are queued and apply as soon as safely possible, before the next model request (including a continuation in the current turn). Further parallel tool work is allowed; the current request keeps its full context. Ranges may include whole reasoning blocks and captured media, and may span system messages (which stay in place), but cannot cross provider checkpoints or split tool-call/result pairs.
-Use when completed exploration or redundant detail can be shortened meaningfully. Preserve conclusions, exact identifiers/paths, user constraints, uncertainties, and unfinished work in the summary. Prefer doing this before your final response to the user, only when useful; then give your final answer normally. Independent, non-overlapping folds may run in parallel. Visible summaries can themselves be folded. peek(id) retrieves visible archived content, including media and nested fold markers, not private reasoning. This changes future context, not stored session history.`
-
-const peekDescription = `Retrieve a folded section by its hash ID, even while it is pending. Returns historical visible text and captured attachments at the end of the conversation, with role/tool labels and any nested fold markers intact. Private reasoning is not returned. The original marker stays in place. Retrieved content remains available until a subsequent user turn after the assistant response finishes, then its tool result is shortened automatically; call peek again if needed. Peek at nested IDs separately for further detail.`
-
 export default Plugin.define({
   id: "context-fold",
   async setup(ctx) {
@@ -75,7 +73,7 @@ export default Plugin.define({
       if (!pending) {
         pending = (async () => {
           const stored = await ctx.storage.get(`sessions/${sessionID}`)
-          return { state: loadState(stored) }
+          return { state: loadState(stored), nudge: {} }
         })()
         sessions.set(sessionID, pending)
         void pending.catch(() => {
@@ -159,7 +157,12 @@ export default Plugin.define({
           await ctx.session.synthetic({ sessionID, text: error })
         }
       }
-      return { view, skipped: projected.skipped, errors: persisted ? activated.errors : [] }
+      return {
+        view,
+        skipped: projected.skipped,
+        errors: persisted ? activated.errors : [],
+        folded: persisted && activated.activated.length > 0,
+      }
     }
 
     await ctx.tool.transform((editor) => {
@@ -267,11 +270,30 @@ export default Plugin.define({
     await ctx.session.hook("context", (event) =>
       serial(event.sessionID, async (runtime) => {
         const before = event.messages
-        const turn = boundary(await ctx.session.context({ sessionID: event.sessionID }))
+        const history = await ctx.session.context({ sessionID: event.sessionID })
+        const turn = boundary(history)
         const rewritten = await rewriteRequest(event.sessionID, runtime, before, turn)
         const { view, skipped } = rewritten
         event.messages = render(view)
         runtime.request = { original: view, current: reserve(view, runtime.state), turn: turn.turn }
+        if (ctx.options.nudges !== false && event.tools.fold) {
+          try {
+            const models = await ctx.catalog.model.list()
+            const model = models.data.find(
+              (model) => model.id === event.model.id && model.providerID === event.model.providerID,
+            )
+            const reminder = nudge(
+              runtime.nudge,
+              history,
+              event.model,
+              model?.limit.context ?? 0,
+              rewritten.folded,
+            )
+            if (reminder) event.system.push({ type: "text", text: reminder })
+          } catch (error) {
+            console.warn("context-fold: could not check context pressure", error)
+          }
+        }
         for (const id of skipped)
           console.warn(`context-fold: fold ${id} no longer matches the transcript and was skipped`)
         if (debug) {
