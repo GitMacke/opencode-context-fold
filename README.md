@@ -4,16 +4,49 @@
 > This plugin is built specifically for **OpenCode V2** using the `@opencode/plugin`
 > V2 API. It does not work with OpenCode V1.
 
-An [OpenCode](https://opencode.ai) plugin that lets the model tidy up its own
-context window. When a stretch of conversation is finished — an exploration
-that's done, a long tool output that's been digested — the model can replace it
-with a summary it writes itself. The original is archived and can be pulled
-back with a single call.
+An [OpenCode v2](https://opencode.ai/v2) plugin that lets the model manage its own
+working context. It can replace a section of conversation with a summary using
+`fold`, consult the original with `peek`, or restore it for ongoing work with
+`unfold`. Replacing long stretches of history with short summaries substantially
+reduce the input tokens carried into each subsequent request. The recursive
+nature of this plugin allows for extremely long sessions with minimal information
+loss in a context efficient way.
 
-No second model, no automatic pruning. The model decides what to fold and
-what the summary should say.
+The model doing the work chooses what to fold and writes the summary. The plugin
+archives the original and changes what the model sees on future requests, leaving
+stored session history intact.
 
-```
+## Context at different levels of detail
+
+Current work needs detail; older work often needs only enough context to recognize
+when it's relevant again. A source document might need its exact wording during
+research, a paragraph once its findings are understood, and a brief mention once
+the whole project is finished. Folds can themselves be folded, letting the model
+build these levels of detail without losing access to the material underneath.
+
+Designing a spaceship might involve separate investigations into propulsion,
+power, and life support. Calculations can be folded into component decisions,
+then those decisions into subsystem summaries. While working on the rest of the
+ship, the propulsion work might be represented by:
+
+> Selected electric propulsion for the cargo ship. Low thrust means longer transit
+> times; power requirements must be coordinated with the electrical system.
+> Calculations and rejected designs are in the supporting folds.
+
+The model can `peek` to check a calculation or `unfold` the design if the power
+budget changes. It can work at the level of the whole ship while keeping a path
+back to the details of each component.
+
+The model is responsible for organizing that memory—keeping useful clues in
+summaries, preserving open questions, and knowing when to look deeper. Current
+frontier models can already do this very efficiently, and the approach will
+only get more powerful as their judgment improves. Better organization means
+more of a long-running conversation can remain useful within the same finite
+context window.
+
+## A fold in practice
+
+```text
 Model: fold({
   start:   "Let me look at how the config loader works",
   end:     "so the loader falls back to defaults.",
@@ -25,27 +58,23 @@ Model: fold({
 
 Model: peek({ id: "P5ms2_" })
 → the full original text of that section
+
+… if those details need to stay in context …
+
+Model: unfold({ id: "P5ms2_" })
+→ restores the section in its original location on the next model request
 ```
 
-From the next model request onward, including a tool-driven continuation in the
-same user turn, the model sees this in place of the original:
+While the section is folded, the model sees this in place of the original:
 
-```
+```text
 [folded P5ms2_] Config loader in src/config.ts reads ~/.app/config.json, validates with zod, falls back to defaults on any error. [/folded]
 ```
 
-## Why
-
-Long agentic sessions fill up with detail that was essential five minutes ago
-and is noise now: directory listings, file contents that have since been
-edited, dead-end investigations. Built-in compaction handles this by having a
-model summarize *everything* at once when the window is nearly full, which is
-lossy and happens at the worst possible moment.
-
-Folding is incremental and voluntary. The model summarizes a section while it
-still remembers what mattered, keeps the rest of the context untouched, and can
-always get the original back. Session history on disk is never modified; only
-what the model is shown changes.
+The change takes effect on the next model request, including a continuation after
+a tool call in the same user turn. Stored session history is never edited. The
+archive remains accessible through `peek` even if later compaction prevents
+restoring the section in place.
 
 ## Install
 
@@ -59,7 +88,7 @@ OpenCode installs the package and its dependencies. Pin a tag or branch with
 `#v0.1.0` or `#main` if you want to control updates.
 
 ```sh
-opencode plugin check                                          # look for updates
+opencode plugin check                                         # look for updates
 opencode plugin update github:GitMacke/opencode-context-fold   # apply them
 opencode plugin remove github:GitMacke/opencode-context-fold   # uninstall
 ```
@@ -82,19 +111,21 @@ Remove the entry to re-enable. Fold state stays in plugin storage either way.
 ```jsonc
 // opencode.jsonc
 {
-  "plugins": [{
-    "package": "github:GitMacke/opencode-context-fold",
-    "options": {
-      "debug": false,
-      // Remind the model to fold as its context grows.
-      "nudges": true,
-      // Show a success toast when queued folds become active.
-      "notifications": {
-        "enabled": true,
-        "duration": 4000
+  "plugins": [
+    {
+      "package": "github:GitMacke/opencode-context-fold",
+      "options": {
+        "debug": false,
+        // Remind the model to fold as its context grows.
+        "nudges": true,
+        // Show a success toast when queued folds become active.
+        "notifications": {
+          "enabled": true,
+          "duration": 4000
+        }
       }
     }
-  }]
+  ]
 }
 ```
 
@@ -118,10 +149,12 @@ its absolute directory in `opencode.jsonc`:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": [{
-    "package": "/absolute/path/to/opencode-context-fold",
-    "options": { "debug": false }
-  }]
+  "plugins": [
+    {
+      "package": "/absolute/path/to/opencode-context-fold",
+      "options": { "debug": false }
+    }
+  ]
 }
 ```
 
@@ -145,18 +178,18 @@ Don't combine this with the `opencode plugin add` install; you'd load two copies
 ### Tools
 
 **`fold({ start, end, summary })`** — `start` and `end` are exact quotes from
-visible conversation text (message prose or tool output). Each must match
-exactly once; if not, the error tells you how many matches there are and shows
-excerpts so you can lengthen the quote. The selection is inclusive of both
-anchors and may span many messages, including whole tool calls with their
-results, reasoning blocks, and images. The fold is validated immediately and
-returns a six-character ID.
+message text or tool output. The selected section includes both quotes and
+everything between them. Each quote must match exactly once; ambiguous matches
+return excerpts to help the model choose a longer quote. The plugin checks the
+selection immediately and returns a six-character archive ID. Text generated in
+the current response becomes selectable on the next model request.
 
 **`peek({ id })`** — returns the archived content of a fold, with role and tool
 labels. Images come back as ordinary file attachments. Reasoning is never
-archived or returned. Peek results are themselves shortened on the next user
-turn to keep the tail of the context small; call `peek` again if you need it
-back.
+archived or returned. The fold stays in place; the retrieved detail is available
+through the current response and its tool calls, then shortened after a later
+user turn. The model can call `peek` again whenever needed. This retrieves a
+historical copy, not a fresh read of a file or external resource.
 
 **`unfold({ id })`** — restores a fold's original content in its original location
 on the next model request. Use it to correct a mistaken summary, bring detail
@@ -167,10 +200,9 @@ If edits or compaction prevent in-place restoration, use `peek` for the archive.
 
 ### Proactive folding and reminders
 
-The tool descriptions encourage folding after substantial exploration or other
-completed phases, rather than waiting until the final answer. They emphasize
-what to preserve and how to retrieve details, leaving implementation mechanics
-out of the model's instructions. The wording lives in `prompts.ts`.
+The model is asked to preserve conclusions, exact paths and identifiers, user
+constraints, uncertainties, and unfinished work. It should keep material it still
+needs verbatim. The tool descriptions and reminder text live in `prompts.ts`.
 
 Reminders use the latest reported usage for the current model, including cached,
 output, and reasoning tokens. This is a lagging pressure signal, not an exact
@@ -185,14 +217,7 @@ fold starts a cooldown and suppresses the old usage reading. Usage from before
 native compaction or a model switch is ignored. No reminder is saved in session
 history, and nudges never choose or fold content automatically.
 
-### Lifecycle
-
-```
-fold() called ──► queued ──► (next model request) ──► active
-                     │                                    │
-                     └─► failed (source changed, or       └─► visible as [folded ID] marker
-                          checkpoint appeared)                 until unfolded or compacted
-```
+### When changes take effect
 
 A fold cannot change a model request that is already in flight. It is queued
 when the tool succeeds, then activates as soon as safely possible: before the
@@ -207,21 +232,16 @@ retired; unfolding also invalidates replay state generated against the folded
 view. A pending fold can be cancelled immediately because it has not changed the
 model-visible context yet. Fold and unfold archives and receipts survive reloads.
 
-On activation, the bundled TUI companion shows one non-blocking success toast
-with the reduction in visible text. Notifications are emitted only after the
-new fold state is persisted; notification delivery is best-effort and cannot
-block folding or model dispatch.
+The TUI shows a toast when folds become active, with the reduction in visible
+text. Parallel folds produce one combined notification.
 
-Providers sign reasoning blocks against the exact history they saw. Activation
-therefore strips replay state generated against the old view before dispatching
-the rewritten request.
-
-Activation strips the replay signatures from the reasoning that was generated
-against the old view (from the first affected message onward) and drops the
-obsolete reasoning blocks themselves. Visible text, tool calls, and results
-are all kept. This costs a prompt-cache miss from the fold point forward —
-batching several folds before a turn ends is cheaper than folding one at a
-time across turns.
+The plugin preserves the unchanged prefix and applies folds from the same tool
+batch together to avoid repeated cache invalidation. This matters because input
+token savings don't translate directly into cost savings when cached input is
+cheaper. Folding or unfolding can cause a cache miss from the changed point
+onward; folding pays off by carrying less context through subsequent requests.
+Obsolete reasoning and provider replay metadata tied to the old context are
+removed.
 
 ### Addressing and replay
 
@@ -240,9 +260,9 @@ find its complete marker, it returns an error without changing other folds.
 
 ### Selection rules
 
-- Each anchor must match exactly once in visible text and lie within a single
-  text part. Tool-call arguments are not searchable; whole calls may still lie
-  inside a range.
+- Each anchor must match exactly once and come from one continuous block of
+  message text or tool output. Tool-call arguments are not searchable; whole
+  calls may still lie inside a range.
 - A range cannot cross a provider checkpoint (native compaction summary); the
   error quotes the text just before the checkpoint. A fold also can't be placed
   before an existing checkpoint. System messages inside a range are kept in
@@ -271,14 +291,10 @@ creating a duplicate. Forked sessions don't inherit folds.
   existing context indicator will not reflect its eventual savings yet.
 - **Cache miss on activation.** Every activation invalidates the provider
   prompt cache from the earliest changed point forward. Unfolding does too.
-- **Provider replay metadata is allow-listed, not understood.** When history
-  before a part changes, its `providerMetadata` is reduced to fields that
-  describe the part itself (`phase`, `type`, `status`, `result`,
-  `annotations`); everything else is assumed to be replay state such as
-  reasoning signatures or item IDs. This was verified against every protocol in
-  `@opencode/ai` 2.0.3 and fails safe: an unknown provider's signature field is
-  dropped and the part replays as fresh, rather than being sent and rejected.
-  OpenCode has no shared helper for this yet; if one appears, use it.
+- **Provider metadata handling is conservative.** After a rewrite, the plugin
+  keeps only known descriptive metadata fields (`phase`, `type`, `status`,
+  `result`, `annotations`). Other fields, including reasoning signatures and
+  item IDs, are removed because they may refer to the old context.
 - **Storage failures degrade, not block.** If plugin storage can't be written
   during activation, the request is served with the previous (un-activated)
   view and activation is retried on the next request. Tool calls still fail if
@@ -286,11 +302,27 @@ creating a duplicate. Forked sessions don't inherit folds.
 - **External media isn't archived.** Only images with captured bytes (data
   URIs or raw buffers) can be folded. URL references are refused rather than
   promising to retrieve a file that may have changed.
-- **Native compaction is a boundary.** Folds on either side of a compaction
-  checkpoint work; folds spanning one don't. The compaction hook shows the
-  summarizer the folded transcript and appends a system instruction asking it
-  to copy `[folded ID]` markers into the checkpoint verbatim so `peek` still
-  works afterward. This is best-effort: nothing forces the summarizer to comply.
+- **Native compaction is a boundary.** New folds cannot cross or precede an
+  existing compaction checkpoint. The plugin asks the compaction model to keep
+  relevant fold IDs and summaries so the archives remain discoverable. That
+  model can still omit them. An archive can be retrieved by ID through `peek`,
+  but `unfold` cannot restore content behind a checkpoint.
+
+## Future work
+
+Nested folds already let a session retain several levels of detail, but the
+structure is still tied to the conversation that produced it. Once native
+compaction introduces a checkpoint, earlier material cannot be reorganized in
+place. Archives remain accessible through `peek` if their IDs are known, but the
+checkpoint summary may omit the references needed to find them.
+
+A longer-term direction is to preserve a navigable memory across those
+boundaries: keep older subjects discoverable, retrieve just the relevant level
+of detail, and let the model revise how that material is organized. That would
+make the approach more useful for a single conversation spanning many projects
+or topics.
+The aim is to explore this while keeping the model in charge and the set of tools
+small.
 
 ## Development
 
@@ -305,6 +337,8 @@ Layout:
 - `core.ts` — view/piece model, anchor resolution, fold application, rendering
 - `lifecycle.ts` — session state, turn-boundary detection, activation
 - `index.ts` — plugin registration, tool definitions, hooks
+- `prompts.ts` — model-facing tool descriptions and reminders
+- `nudge.ts` — context-pressure checks and reminder cooldown
 
 ## License
 
