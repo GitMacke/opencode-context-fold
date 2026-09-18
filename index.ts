@@ -1,4 +1,4 @@
-// Plugin wiring: registers the `fold` and `peek` tools, hooks the context and
+// Plugin wiring: registers the context tools, hooks the context and
 // compaction requests, and serializes all work per session so parallel tool
 // calls resolve against the same snapshot the model saw.
 import { mkdir, rename, writeFile } from "node:fs/promises"
@@ -20,23 +20,26 @@ import {
 } from "./core"
 import {
   activate,
+  activateUnfolds,
   type Boundary,
   boundary,
   loadState,
+  planUnfold,
   project,
   readyFolds,
   reserve,
   type SavedFold,
   type State,
+  type Unfold,
 } from "./lifecycle"
 import { type NudgeState, nudge } from "./nudge"
-import { foldDescription, peekDescription } from "./prompts"
+import { foldDescription, peekDescription, unfoldDescription } from "./prompts"
 import { ContextFoldRpc } from "./rpc"
 
 interface Runtime {
   state: State
   nudge: NudgeState
-  request?: { original: View; current: View; turn: string }
+  request?: { messages: readonly Message[]; original: View; current: View; turn: string }
 }
 
 interface NotificationOptions {
@@ -116,6 +119,15 @@ export default Plugin.define({
       }),
     })
 
+    const unfoldReceipt = (unfold: Unfold) => ({
+      content: JSON.stringify({
+        id: unfold.id,
+        status: unfold.status === "applied" ? "unfolded" : unfold.status,
+        ...(unfold.status === "pending" ? { applies: "next_model_request" } : {}),
+        ...(unfold.error ? { error: unfold.error } : {}),
+      }),
+    })
+
     async function rewriteRequest(
       sessionID: string,
       runtime: Runtime,
@@ -124,7 +136,10 @@ export default Plugin.define({
     ) {
       const projected = project(messages, runtime.state)
       const beforeChars = viewChars(projected.view)
-      const activated = activate(projected.view, runtime.state, turn, readyFolds(messages, runtime.state))
+      const unfolded = activateUnfolds(messages, runtime.state, turn)
+      const restored = unfolded.state === runtime.state ? projected : project(messages, unfolded.state)
+      const activated = activate(restored.view, unfolded.state, turn, readyFolds(messages, unfolded.state))
+      const errors = [...unfolded.errors, ...activated.errors]
       let view = projected.view
       let persisted = activated.state === runtime.state
       if (!persisted) {
@@ -132,7 +147,7 @@ export default Plugin.define({
           await save(sessionID, runtime, activated.state)
           persisted = true
         } catch (error) {
-          console.warn("context-fold: could not persist fold activation; serving previous view", error)
+          console.warn("context-fold: could not persist context changes; serving previous view", error)
         }
       }
       if (persisted) {
@@ -152,7 +167,7 @@ export default Plugin.define({
             })
             .catch((error) => console.warn("context-fold: could not send fold notification", error))
         }
-        for (const error of activated.errors) {
+        for (const error of errors) {
           console.warn("context-fold:", error)
           await ctx.session.synthetic({ sessionID, text: error })
         }
@@ -160,7 +175,7 @@ export default Plugin.define({
       return {
         view,
         skipped: projected.skipped,
-        errors: persisted ? activated.errors : [],
+        errors: persisted ? errors : [],
         folded: persisted && activated.activated.length > 0,
       }
     }
@@ -193,7 +208,8 @@ export default Plugin.define({
             try {
               let prepared = prepareFold(runtime.request.original, input as FoldInput)
               const duplicate = runtime.state.folds.find(
-                (saved) => saved.status !== "failed" && sameFold(saved, prepared),
+                (saved) =>
+                  (saved.status === "active" || saved.status === "pending") && sameFold(saved, prepared),
               )
               if (duplicate) return receipt(duplicate)
               for (
@@ -214,13 +230,70 @@ export default Plugin.define({
                   "A provider checkpoint follows the selection; its state cannot be rewritten.",
                 )
               const current = applyFold(runtime.request.current, fold)
-              await save(tool.sessionID, runtime, {
+              const state: State = {
                 ...runtime.state,
                 folds: [...runtime.state.folds, fold],
                 calls: { ...runtime.state.calls, [tool.id]: fold.id },
-              })
+              }
+              for (const unfold of Object.values(state.unfolds)) {
+                if (unfold.status === "pending") planUnfold(runtime.request.messages, state, unfold.id)
+              }
+              await save(tool.sessionID, runtime, state)
               runtime.request.current = current
               return receipt(fold)
+            } catch (error) {
+              if (!(error instanceof FoldError)) throw error
+              return { content: JSON.stringify({ error: error.message }) }
+            }
+          }),
+      })
+      editor.add({
+        name: "unfold",
+        description: unfoldDescription,
+        input: {
+          type: "object",
+          properties: { id: { type: "string", minLength: 1 } },
+          required: ["id"],
+          additionalProperties: false,
+        },
+        options: { codemode: false },
+        execute: (input, tool) =>
+          serial(tool.sessionID, async (runtime) => {
+            const previous = runtime.state.unfolds[tool.id]
+            if (previous) return unfoldReceipt(previous)
+            const { id } = input as { id: string }
+            const fold = runtime.state.folds.find((fold) => fold.id === id)
+            if (!fold) return { content: JSON.stringify({ error: `No fold ${id} in this session.` }) }
+            if (!runtime.request)
+              return {
+                content: JSON.stringify({
+                  error: "No context snapshot. Retry after the next model request.",
+                }),
+              }
+            const pending = Object.values(runtime.state.unfolds).find(
+              (unfold) => unfold.id === id && unfold.status === "pending",
+            )
+            if (pending) return unfoldReceipt(pending)
+            try {
+              if (fold.status === "failed")
+                throw new FoldError(`Fold ${id} was not applied. Its archive is available through peek.`)
+              if (fold.status === "active") planUnfold(runtime.request.messages, runtime.state, id)
+              const unfold: Unfold = {
+                id,
+                status: fold.status === "active" ? "pending" : "applied",
+                turn: runtime.request.turn,
+                messageID: tool.messageID,
+              }
+              const state: State = {
+                ...runtime.state,
+                folds: runtime.state.folds.map((saved) =>
+                  saved.id === id && saved.status === "pending" ? { ...saved, status: "unfolded" } : saved,
+                ),
+                unfolds: { ...runtime.state.unfolds, [tool.id]: unfold },
+              }
+              await save(tool.sessionID, runtime, state)
+              runtime.request.current = reserve(runtime.request.original, state)
+              return unfoldReceipt(unfold)
             } catch (error) {
               if (!(error instanceof FoldError)) throw error
               return { content: JSON.stringify({ error: error.message }) }
@@ -275,7 +348,12 @@ export default Plugin.define({
         const rewritten = await rewriteRequest(event.sessionID, runtime, before, turn)
         const { view, skipped } = rewritten
         event.messages = render(view)
-        runtime.request = { original: view, current: reserve(view, runtime.state), turn: turn.turn }
+        runtime.request = {
+          messages: before,
+          original: view,
+          current: reserve(view, runtime.state),
+          turn: turn.turn,
+        }
         if (ctx.options.nudges !== false && event.tools.fold) {
           try {
             const models = await ctx.catalog.model.list()

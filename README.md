@@ -158,6 +158,13 @@ archived or returned. Peek results are themselves shortened on the next user
 turn to keep the tail of the context small; call `peek` again if you need it
 back.
 
+**`unfold({ id })`** — restores a fold's original content in its original location
+on the next model request. Use it to correct a mistaken summary, bring detail
+back for ongoing work, or reorganize material into better folds. Restored content
+stays visible until folded again or compacted. Inner folds stay folded, and the
+archive remains available through `peek`. Unfolding a pending fold cancels it.
+If edits or compaction prevent in-place restoration, use `peek` for the archive.
+
 ### Proactive folding and reminders
 
 The tool descriptions encourage folding after substantial exploration or other
@@ -184,7 +191,7 @@ history, and nudges never choose or fold content automatically.
 fold() called ──► queued ──► (next model request) ──► active
                      │                                    │
                      └─► failed (source changed, or       └─► visible as [folded ID] marker
-                         checkpoint appeared)                 until session ends
+                          checkpoint appeared)                 until unfolded or compacted
 ```
 
 A fold cannot change a model request that is already in flight. It is queued
@@ -192,6 +199,13 @@ when the tool succeeds, then activates as soon as safely possible: before the
 next model request, including a tool-driven continuation in the same user turn.
 Parallel folds from one tool batch activate together. If there is no
 continuation, the fold naturally waits for the next user turn.
+
+Unfolding an active fold uses the same next-request boundary and persistence
+guarantees. The original source is restored with its message roles, tool pairs,
+and attachments intact. Obsolete reasoning and provider replay signatures stay
+retired; unfolding also invalidates replay state generated against the folded
+view. A pending fold can be cancelled immediately because it has not changed the
+model-visible context yet. Fold and unfold archives and receipts survive reloads.
 
 On activation, the bundled TUI companion shows one non-blocking success toast
 with the reduction in visible text. Notifications are emitted only after the
@@ -221,6 +235,8 @@ passage later can't shift an earlier fold.
 
 Folds can nest: fold a region that contains an earlier marker, and the outer
 archive contains the inner marker. Peeking the outer fold reveals the inner ID.
+Unfolding the outer fold restores the inner marker in place. If an unfold cannot
+find its complete marker, it returns an error without changing other folds.
 
 ### Selection rules
 
@@ -254,7 +270,7 @@ creating a duplicate. Forked sessions don't inherit folds.
   session becomes idle without another request, the fold remains queued and the
   existing context indicator will not reflect its eventual savings yet.
 - **Cache miss on activation.** Every activation invalidates the provider
-  prompt cache from the earliest fold point forward.
+  prompt cache from the earliest changed point forward. Unfolding does too.
 - **Provider replay metadata is allow-listed, not understood.** When history
   before a part changes, its `providerMetadata` is reduced to fields that
   describe the part itself (`phase`, `type`, `status`, `result`,

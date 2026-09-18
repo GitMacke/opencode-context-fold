@@ -1,4 +1,5 @@
-// Per-session state and the fold lifecycle: pending -> active | failed.
+// Per-session state and the fold lifecycle: pending -> active | failed,
+// with cancellation/restoration to unfolded.
 // `project` replays persisted rewrites onto a fresh transcript, `boundary`
 // decides whether a real user turn has completed, and `activate` promotes
 // pending folds (and expires old peek results) at that boundary, recording the
@@ -12,6 +13,7 @@ import {
   FoldError,
   foldStart,
   hasCheckpointAfter,
+  markerStart,
   peekStart,
   type Reset,
   resetFrom,
@@ -24,7 +26,7 @@ export interface Expansion {
   turn: string
 }
 export interface SavedFold extends Fold {
-  status: "pending" | "active" | "failed"
+  status: "pending" | "active" | "failed" | "unfolded"
   turn?: string
   messageID?: string
   error?: string
@@ -34,30 +36,42 @@ interface Rewrite {
   peeks: string[]
   reset: Reset
 }
+export interface Unfold {
+  id: string
+  status: "pending" | "applied" | "failed"
+  turn: string
+  messageID: string
+  error?: string
+}
 export interface State {
-  version: 2
+  version: 3
   folds: SavedFold[]
   rewrites: Rewrite[]
   expansions: Record<string, Expansion & { collapsed?: boolean }>
   calls: Record<string, string>
+  unfolds: Record<string, Unfold>
 }
 
 export function loadState(value: unknown): State {
-  if (value === undefined) return { version: 2, folds: [], rewrites: [], expansions: {}, calls: {} }
+  if (value === undefined)
+    return { version: 3, folds: [], rewrites: [], expansions: {}, calls: {}, unfolds: {} }
   const state = value as State
   if (!state || !Array.isArray(state.folds) || !state.calls || !state.expansions)
     throw new Error("context-fold: invalid stored state")
   if ((value as { version: number }).version === 1) {
     return {
       ...state,
-      version: 2,
+      version: 3,
+      unfolds: {},
       folds: state.folds.map((fold) => ({ ...fold, status: "active" })),
       rewrites: [
         { folds: state.folds.map((fold) => fold.id), peeks: [], reset: { retired: [], cleaned: [] } },
       ],
     }
   }
-  if (state.version !== 2 || !Array.isArray(state.rewrites))
+  if (!Array.isArray(state.rewrites)) throw new Error("context-fold: unrecognized stored state version")
+  if ((value as { version: number }).version === 2) return { ...state, version: 3, unfolds: {} }
+  if (state.version !== 3 || !state.unfolds)
     throw new Error("context-fold: unrecognized stored state version")
   return state
 }
@@ -75,6 +89,7 @@ export function project(messages: readonly Message[], state: State): { view: Vie
         skipped.push(id)
         continue
       }
+      if (fold.status === "unfolded") continue
       try {
         view = applyFold(view, fold)
       } catch (error) {
@@ -144,6 +159,66 @@ export function reserve(view: View, state: State): View {
     }
   }
   return view
+}
+
+// Rebuild from durable source messages instead of reinserting archived prose.
+// This restores roles, tool pairs, media, and untouched inner folds. Historical
+// reasoning resets still apply even when the fold that caused them is disabled.
+export function planUnfold(messages: readonly Message[], state: State, id: string) {
+  const fold = state.folds.find((fold) => fold.id === id)
+  if (fold?.status !== "active") throw new FoldError(`Fold ${id} is not active.`)
+  const before = project(messages, state)
+  const reserved = reserve(before.view, state)
+  const start = markerStart(reserved, fold)
+  if (hasCheckpointAfter(reserved, start))
+    throw new FoldError("A compaction checkpoint follows this fold. Use peek to retrieve its archive.")
+  const next: State = {
+    ...state,
+    folds: state.folds.map((saved) => (saved.id === id ? { ...saved, status: "unfolded" } : saved)),
+  }
+  const restored = project(messages, next)
+  if (restored.skipped.some((id) => !before.skipped.includes(id)))
+    throw new FoldError("Unfolding would invalidate another fold. Unfold the surrounding fold first.")
+  // Validate the original source/digest as well as the visible marker. A copied
+  // marker in a compaction summary is not enough to restore the source in place.
+  applyFold(restored.view, fold)
+  let pending = restored.view
+  for (const saved of next.folds) {
+    if (saved.status === "pending") pending = applyFold(pending, saved)
+  }
+  const reset = resetFrom(restored.view, foldStart(restored.view, fold))
+  return {
+    state: { ...next, rewrites: [...next.rewrites, { folds: [], peeks: [], reset }] },
+    view: resetView(restored.view, reset),
+  }
+}
+
+export function activateUnfolds(messages: readonly Message[], state: State, turn?: Boundary) {
+  const results = new Set(
+    messages.flatMap((message) =>
+      message.content.flatMap((part) => (part.type === "tool-result" ? [part.id] : [])),
+    ),
+  )
+  let current = state
+  const errors: string[] = []
+  for (const [callID, unfold] of Object.entries(state.unfolds)) {
+    if (unfold.status !== "pending") continue
+    const closed = !!turn?.closed && unfold.turn !== turn.turn && turn.completed.has(unfold.messageID)
+    if (!results.has(callID) && !closed) continue
+    let result: Unfold
+    try {
+      current = planUnfold(messages, current, unfold.id).state
+      result = { ...unfold, status: "applied" }
+    } catch (error) {
+      if (!(error instanceof FoldError)) throw error
+      result = { ...unfold, status: "failed", error: error.message }
+      errors.push(
+        `Fold ${unfold.id} was not unfolded: ${error.message} Its archive remains available through peek.`,
+      )
+    }
+    current = { ...current, unfolds: { ...current.unfolds, [callID]: result } }
+  }
+  return { state: current, errors }
 }
 
 // A successful fold is safe to publish once its tool result is part of the

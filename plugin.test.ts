@@ -449,3 +449,124 @@ test("successful fold activation suppresses nudges based on the old context", as
   expect(event.system).toEqual([])
   expect((await host.request(continuation(["f1"]))).system).toEqual([])
 })
+
+test("unfold waits for its result, survives reload, keeps peek, and permits an identical refold", async () => {
+  const host = await harness()
+  await host.request()
+  const fold = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  const foldedMessages = continuation(["f1"])
+  await host.request(foldedMessages)
+  const queued = JSON.parse((await host.call("unfold", { id: fold.id }, "uf1")).content as string)
+  expect(queued).toMatchObject({ id: fold.id, status: "pending", applies: "next_model_request" })
+  expect(JSON.stringify((await host.request(foldedMessages)).messages)).toContain(`[folded ${fold.id}]`)
+
+  const reloaded = await harness(host.storage)
+  const messages = continuation(["f1", "uf1"])
+  const restored = await reloaded.request(messages)
+  expect(JSON.stringify(restored.messages)).toContain(prose)
+  expect(JSON.stringify(restored.messages)).not.toContain(`[folded ${fold.id}]`)
+  expect(JSON.parse((await reloaded.call("unfold", { id: fold.id }, "uf1")).content as string).status).toBe(
+    "unfolded",
+  )
+  expect((await reloaded.call("peek", { id: fold.id }, "p1")).content).toContain(prose)
+  const repeated = JSON.parse((await reloaded.call("fold", firstInput, "f2")).content as string)
+  expect(repeated.status).toBe("pending")
+  expect(repeated.id).not.toBe(fold.id)
+  const refolded = await reloaded.request(continuation(["f1", "uf1", "f2"]))
+  expect(JSON.stringify(refolded.messages)).toContain(`[folded ${repeated.id}]`)
+  expect(JSON.stringify(refolded.messages)).not.toContain(prose)
+})
+
+test("unfold cancels a pending fold, frees its reservation, and is session-scoped", async () => {
+  const host = await harness()
+  await host.request()
+  const fold = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  const cancelled = JSON.parse((await host.call("unfold", { id: fold.id }, "uf1")).content as string)
+  expect(cancelled).toEqual({ id: fold.id, status: "unfolded" })
+  expect(JSON.stringify((await host.request(continuation(["f1", "uf1"]))).messages)).toContain(prose)
+  expect((await host.call("peek", { id: fold.id }, "p1")).content).toContain(prose)
+  expect((await host.call("unfold", { id: fold.id }, "uf1", "s2")).content).toContain("No fold")
+  const refolded = JSON.parse((await host.call("fold", firstInput, "f2")).content as string)
+  expect(refolded.status).toBe("pending")
+  expect(refolded.id).not.toBe(fold.id)
+})
+
+test("unfold commits and activation persist before changing memory or outgoing context", async () => {
+  const host = await harness()
+  await host.request()
+  const fold = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  await host.request(continuation(["f1"]))
+  host.failWrites(true)
+  await expect(host.call("unfold", { id: fold.id }, "uf1")).rejects.toThrow("storage failure")
+  host.failWrites(false)
+  await host.call("unfold", { id: fold.id }, "uf1")
+  host.failWrites(true)
+  expect(JSON.stringify((await host.request(continuation(["f1", "uf1"]))).messages)).toContain(
+    `[folded ${fold.id}]`,
+  )
+  host.failWrites(false)
+  expect(JSON.stringify((await host.request(continuation(["f1", "uf1"]))).messages)).toContain(prose)
+})
+
+test("parallel disjoint unfolds activate together, while overlapping fold/unfold calls conflict", async () => {
+  const host = await harness()
+  await host.request()
+  const first = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  const second = JSON.parse((await host.call("fold", secondInput, "f2")).content as string)
+  const messages = continuation(["f1", "f2"])
+  await host.request(messages)
+  const combined = {
+    start: `[folded ${first.id}]`,
+    end: `[folded ${second.id}] Second finding. [/folded]`,
+    summary: "Combined.",
+  }
+  const outer = JSON.parse((await host.call("fold", combined, "outer")).content as string)
+  expect(outer.status).toBe("pending")
+  const hidden = await host.call("unfold", { id: first.id }, "hidden")
+  expect(JSON.parse(hidden.content as string).error).toContain("marker is not available")
+  await host.call("unfold", { id: outer.id }, "cancel-outer")
+  await Promise.all([
+    host.call("unfold", { id: first.id }, "uf1"),
+    host.call("unfold", { id: second.id }, "uf2"),
+  ])
+  const conflict = await host.call("fold", combined, "f3")
+  expect(JSON.parse(conflict.content as string).error).toBeTruthy()
+  const restored = await host.request(continuation(["f1", "f2", "uf1", "uf2"]))
+  expect(JSON.stringify(restored.messages)).toContain(prose)
+  expect(JSON.stringify(restored.messages)).toContain(secondInput.start)
+  expect(JSON.stringify(restored.messages)).not.toContain("[folded")
+})
+
+test("unfold activation works at compaction and completed-turn boundaries", async () => {
+  for (const kind of ["context", "compaction"]) {
+    const host = await harness()
+    await host.request()
+    const fold = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+    await host.request(continuation(["f1"]))
+    await host.call("unfold", { id: fold.id }, "uf1")
+    if (kind === "context") host.finish()
+    const messages = kind === "context" ? nextMessages() : continuation(["f1", "uf1"])
+    const restored = await host.request(messages, "s1", kind)
+    expect(JSON.stringify(restored.messages)).toContain(prose)
+    expect(JSON.stringify(restored.messages)).not.toContain(`[folded ${fold.id}]`)
+    expect(restored.system).toEqual([])
+  }
+})
+
+test("source changes after queuing an unfold produce one persistent notice and retain the archive", async () => {
+  const host = await harness()
+  await host.request()
+  const fold = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  await host.request(continuation(["f1"]))
+  await host.call("unfold", { id: fold.id }, "uf1")
+  const messages = continuation(["f1", "uf1"])
+  messages[1] = Message.make({ id: "a1", role: "assistant", content: "Edited history" })
+  expect(JSON.stringify((await host.request(messages)).messages)).toContain("Edited history")
+  expect(host.notices).toHaveLength(1)
+  expect(host.notices[0]).toContain("was not unfolded")
+  await host.request(messages)
+  expect(host.notices).toHaveLength(1)
+  expect((await host.call("peek", { id: fold.id }, "p1")).content).toContain(prose)
+  const receipt = JSON.parse((await host.call("unfold", { id: fold.id }, "uf1")).content as string)
+  expect(receipt.status).toBe("failed")
+})

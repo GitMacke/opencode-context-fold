@@ -179,7 +179,7 @@ function anchor(view: View, value: string, label: string): { start: Position; en
   })
   if (!matches.length)
     throw new FoldError(
-      `${label} not found. Quote visible message/result text; keep each anchor within one text part.`,
+      `${label} quote not found. Copy an exact quote from message text or tool output already present before this response. Text you just wrote becomes selectable on the next model request.`,
     )
   if (matches.length !== 1)
     throw new FoldError(
@@ -437,6 +437,19 @@ export function resetFrom(view: View, index: number): Reset {
 
 export function foldStart(view: View, fold: Fold): number {
   return locate(view, fold.start, false).block
+}
+
+export function markerStart(view: View, fold: Fold): number {
+  const index = view.findIndex((block) =>
+    block.pieces.some(
+      (piece) => piece.source === `fold:${fold.id}` && piece.offset === 0 && piece.text === marker(fold),
+    ),
+  )
+  if (index < 0)
+    throw new FoldError(
+      `Fold ${fold.id} exists, but its marker is not available in the current context. Use peek to inspect its archive temporarily. If it is inside another fold, unfold that fold first to restore it in place.`,
+    )
+  return index
 }
 
 export function resetView(view: View, reset: Reset): View {
