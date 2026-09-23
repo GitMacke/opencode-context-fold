@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { type NudgeState, nudge } from "./nudge"
-import { softNudge, strongNudge } from "./prompts"
+import { nudgeText } from "./prompts"
 
 const model = { providerID: "test", id: "test" }
 const usage = (id: string, input: number) => ({
@@ -10,56 +10,59 @@ const usage = (id: string, input: number) => ({
   tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
 })
 
-test("pressure uses reported tokens including cache, output, and reasoning", () => {
-  expect(nudge({}, [usage("1", 59_999)], model, 100_000, false)).toBeUndefined()
-  expect(nudge({}, [usage("1", 60_000)], model, 100_000, false)).toBe(softNudge)
-  expect(nudge({}, [usage("1", 80_000)], model, 100_000, false)).toBe(strongNudge)
+test("reminders fire each time context grows by the interval, counting cache, output, and reasoning", () => {
+  const state: NudgeState = {}
+  expect(nudge(state, [usage("1", 30_000)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("2", 79_999)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("3", 80_000)], model, 50_000, false)).toBe(nudgeText(50_000))
+  // Repeated hooks for the same reading don't fire again.
+  expect(nudge(state, [usage("3", 80_000)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("4", 120_000)], model, 50_000, false)).toBeUndefined()
   const cached = {
-    ...usage("1", 0),
-    tokens: { input: 1_000, output: 2_000, reasoning: 3_000, cache: { read: 70_000, write: 4_000 } },
+    ...usage("5", 0),
+    tokens: { input: 1_000, output: 2_000, reasoning: 3_000, cache: { read: 120_000, write: 4_000 } },
   }
-  expect(nudge({}, [cached], model, 100_000, false)).toBe(strongNudge)
+  expect(nudge(state, [cached], model, 50_000, false)).toBe(nudgeText(50_000))
 })
 
-test("cooldown counts fresh responses, allows escalation, and resets at low pressure", () => {
+test("folding ignores the stale reading and restarts the interval from the next one", () => {
   const state: NudgeState = {}
-  expect(nudge(state, [usage("1", 60_000)], model, 100_000, false)).toBe(softNudge)
-  expect(nudge(state, [usage("1", 60_000)], model, 100_000, false)).toBeUndefined()
-  expect(nudge(state, [usage("2", 80_000)], model, 100_000, false)).toBe(strongNudge)
-  for (let i = 3; i <= 6; i++) {
-    expect(nudge(state, [usage(String(i), 80_000)], model, 100_000, false)).toBeUndefined()
-  }
-  expect(nudge(state, [usage("7", 80_000)], model, 100_000, false)).toBe(strongNudge)
-  expect(nudge(state, [usage("8", 20_000)], model, 100_000, false)).toBeUndefined()
-  expect(nudge(state, [usage("9", 60_000)], model, 100_000, false)).toBe(softNudge)
+  nudge(state, [usage("1", 10_000)], model, 50_000, false)
+  expect(nudge(state, [usage("2", 90_000)], model, 50_000, true)).toBeUndefined()
+  expect(nudge(state, [usage("2", 90_000)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("3", 40_000)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("4", 89_999)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("5", 90_000)], model, 50_000, false)).toBe(nudgeText(50_000))
 })
 
-test("folding blocks stale usage and grants cooldown even if pressure escalates", () => {
+test("shrinking context and model switches restart the interval", () => {
   const state: NudgeState = {}
-  nudge(state, [usage("1", 60_000)], model, 100_000, false)
-  expect(nudge(state, [usage("2", 90_000)], model, 100_000, true)).toBeUndefined()
-  expect(nudge(state, [usage("2", 90_000)], model, 100_000, false)).toBeUndefined()
-  for (let i = 3; i <= 6; i++) {
-    expect(nudge(state, [usage(String(i), 90_000)], model, 100_000, false)).toBeUndefined()
-  }
-  expect(nudge(state, [usage("7", 90_000)], model, 100_000, false)).toBe(strongNudge)
+  nudge(state, [usage("1", 100_000)], model, 50_000, false)
+  expect(nudge(state, [usage("2", 20_000)], model, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [usage("3", 70_000)], model, 50_000, false)).toBe(nudgeText(50_000))
+  const other = { ...model, id: "other" }
+  expect(nudge(state, [{ ...usage("4", 200_000), model: other }], other, 50_000, false)).toBeUndefined()
+  expect(nudge(state, [{ ...usage("5", 250_000), model: other }], other, 50_000, false)).toBe(
+    nudgeText(50_000),
+  )
 })
 
 test("missing, invalid, foreign-model, and pre-checkpoint usage cannot trigger reminders", () => {
-  expect(nudge({}, [], model, 100_000, false)).toBeUndefined()
-  for (const limit of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-    expect(nudge({}, [usage("1", 90_000)], model, limit, false)).toBeUndefined()
+  const primed = (): NudgeState => ({ baseline: 0, model: JSON.stringify(["test", "test", null]) })
+  expect(nudge(primed(), [], model, 50_000, false)).toBeUndefined()
+  for (const every of [0, -1, Number.NaN]) {
+    expect(nudge(primed(), [usage("1", 90_000)], model, every, false)).toBeUndefined()
   }
-  expect(nudge({}, [usage("1", Number.NaN)], model, 100_000, false)).toBeUndefined()
+  expect(nudge(primed(), [usage("1", Number.NaN)], model, 50_000, false)).toBeUndefined()
   for (const other of [
     { ...model, id: "other" },
     { ...model, providerID: "other" },
   ]) {
-    expect(nudge({}, [usage("1", 90_000)], other, 100_000, false)).toBeUndefined()
+    expect(nudge(primed(), [usage("1", 90_000)], other, 50_000, false)).toBeUndefined()
   }
   for (const type of ["compaction", "model-switched"]) {
     const history = [usage("1", 90_000), { id: "boundary", type }]
-    expect(nudge({}, history, model, 100_000, false)).toBeUndefined()
-    expect(nudge({}, [...history, usage("2", 60_000)], model, 100_000, false)).toBe(softNudge)
+    expect(nudge(primed(), history, model, 50_000, false)).toBeUndefined()
+    expect(nudge(primed(), [...history, usage("2", 60_000)], model, 50_000, false)).toBe(nudgeText(60_000))
   }
 })

@@ -1,4 +1,4 @@
-import { softNudge, strongNudge } from "./prompts"
+import { nudgeText } from "./prompts"
 
 interface ModelRef {
   providerID: string
@@ -21,18 +21,20 @@ interface UsageMessage {
 export interface NudgeState {
   usageID?: string
   blockedID?: string
-  level?: number
-  remaining?: number
+  model?: string
+  baseline?: number
 }
 
-// Reported usage describes the preceding model call, not an exact count of the
-// outgoing request. Never reuse pre-compaction/foreign-model usage, or usage
-// measured before a newly activated fold. No tokenizer or persisted state needed.
+// Remind the model each time its context has grown by `every` tokens since the
+// last fold. The baseline is the first fresh usage reading after a fold, a
+// compaction (usage drops), a model switch, or plugin start. Reported usage
+// describes the preceding model call, so the reading measured before a newly
+// activated fold is ignored. No tokenizer or persisted state needed.
 export function nudge(
   state: NudgeState,
   history: readonly UsageMessage[],
   model: ModelRef,
-  limit: number,
+  every: number,
   folded: boolean,
 ): string | undefined {
   let usage: UsageMessage | undefined
@@ -45,10 +47,9 @@ export function nudge(
   }
   if (folded) {
     state.blockedID = usage?.id
-    state.level = 2
-    state.remaining = 4
+    state.baseline = undefined
   }
-  if (!usage?.tokens || !usage.model || !Number.isFinite(limit) || limit <= 0) return
+  if (!usage?.tokens || !usage.model || !Number.isFinite(every) || every <= 0) return
   if (
     usage.model.id !== model.id ||
     usage.model.providerID !== model.providerID ||
@@ -62,19 +63,14 @@ export function nudge(
   const total = tokens.input + tokens.cache.read + tokens.cache.write + tokens.output + tokens.reasoning
   if (!Number.isFinite(total) || total <= 0) return
   state.usageID = usage.id
-  const level = total >= limit * 0.8 ? 2 : total >= limit * 0.6 ? 1 : 0
-  if (!level) {
-    state.level = 0
-    state.remaining = 0
+  const key = JSON.stringify([model.providerID, model.id, model.variant ?? null])
+  if (state.model !== key || state.baseline === undefined || total < state.baseline) {
+    state.model = key
+    state.baseline = total
     return
   }
-  // Escalate immediately from soft to strong, but otherwise allow four fresh
-  // model responses between reminders. Repeated hooks don't consume cooldown.
-  if ((state.remaining ?? 0) > 0 && level <= (state.level ?? 2)) {
-    state.remaining = (state.remaining ?? 0) - 1
-    return
-  }
-  state.level = level
-  state.remaining = 4
-  return level === 2 ? strongNudge : softNudge
+  const growth = total - state.baseline
+  if (growth < every) return
+  state.baseline = total
+  return nudgeText(growth)
 }

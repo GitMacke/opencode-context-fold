@@ -13,6 +13,9 @@
 - List active folds that compaction or other rewrites made undiscoverable in a
   persisted notice at the end of the next request, so their archives stay
   reachable through `peek`. Nested folds are covered through their outer fold.
+- Replace the 60%/80% context-limit nudges with a reminder after every
+  `nudges.every` tokens (default 50,000) of growth without a fold, appended to
+  the end of the request instead of the system prompt to preserve the cache.
 
 ## 0.1.0
 

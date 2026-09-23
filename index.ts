@@ -63,6 +63,17 @@ function notificationOptions(value: unknown): NotificationOptions {
   return { enabled: options.enabled !== false, duration }
 }
 
+function nudgeOptions(value: unknown): { enabled: boolean; every: number } {
+  if (value === false) return { enabled: false, every: 50_000 }
+  if (!value || typeof value !== "object") return { enabled: true, every: 50_000 }
+  const options = value as { enabled?: unknown; every?: unknown }
+  const every =
+    typeof options.every === "number" && Number.isInteger(options.every) && options.every >= 1_000
+      ? options.every
+      : 50_000
+  return { enabled: options.enabled !== false, every }
+}
+
 export default Plugin.define({
   id: "context-fold",
   async setup(ctx) {
@@ -70,6 +81,7 @@ export default Plugin.define({
     const queues = new Map<string, Promise<void>>()
     const debug = ctx.options.debug === true
     const notifications = notificationOptions(ctx.options.notifications)
+    const nudges = nudgeOptions(ctx.options.nudges)
     const dumpDir = path.join(os.tmpdir(), "opencode-context-fold")
     const rpc = await ctx.rpc.register(ContextFoldRpc, {})
 
@@ -370,23 +382,11 @@ export default Plugin.define({
           current: reserve(view, runtime.state),
           turn: turn.turn,
         }
-        if (ctx.options.nudges !== false && event.tools.fold) {
-          try {
-            const models = await ctx.catalog.model.list()
-            const model = models.data.find(
-              (model) => model.id === event.model.id && model.providerID === event.model.providerID,
-            )
-            const reminder = nudge(
-              runtime.nudge,
-              history,
-              event.model,
-              model?.limit.context ?? 0,
-              rewritten.folded,
-            )
-            if (reminder) event.system.push({ type: "text", text: reminder })
-          } catch (error) {
-            console.warn("context-fold: could not check context pressure", error)
-          }
+        // Reminders go at the end of this request only, leaving the cached
+        // prefix untouched.
+        if (nudges.enabled && event.tools.fold) {
+          const reminder = nudge(runtime.nudge, history, event.model, nudges.every, rewritten.folded)
+          if (reminder) event.messages.push(Message.make({ role: "user", content: reminder }))
         }
         for (const id of skipped)
           console.warn(`context-fold: fold ${id} no longer matches the transcript and was skipped`)

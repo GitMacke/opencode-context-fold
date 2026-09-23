@@ -22,9 +22,8 @@ export const unfoldDescription = `Restore the original content of a fold in its 
 
 After a successful call, the content returns on the next model request and stays visible until you fold it again or the conversation is compacted. Earlier folds inside the restored section stay folded. The archive remains available through peek. Calling unfold on a pending fold cancels it. If the original content can no longer be restored, use peek to retrieve the archive.`
 
-export const softNudge = `Context is growing. Before moving into the next phase, use fold to summarize completed exploration and bulky results you have already understood. Keep conclusions, exact paths, constraints, and open questions; use peek later for details. Keep anything you still need verbatim, and continue normally if nothing is ready to fold.`
-
-export const strongNudge = `Context is approaching its limit. Before gathering substantial additional information, use fold on completed sections whose raw detail is no longer needed. Preserve conclusions, exact paths, constraints, uncertainties, and unfinished work. The originals remain available through peek. If no section can be usefully shortened yet, continue the task.`
+export const nudgeText = (tokens: number) =>
+  `[context-fold] The context has grown by about ${Math.round(tokens / 1_000)}k tokens without a fold. If a phase of work is complete, fold what you no longer need verbatim, keeping conclusions, exact paths, and open questions. Otherwise continue normally.`
 
 export const recoveryNotice = (markers: string[]) =>
   `[context-fold] Earlier context containing these folds was removed. Their archives remain available through peek:\n${markers.join("\n")}`

@@ -46,18 +46,10 @@ async function harness(
   let durable: unknown[] = [{ type: "user", id: "u1" }]
   const notices: string[] = []
   const events: { name: string; data: unknown }[] = []
-  let contextLimit = 100_000
   let foldAvailable = true
   const cleanup = await plugin.setup({
     options,
     location: { directory: "/unused" },
-    catalog: {
-      model: {
-        list: async () => ({
-          data: [{ id: "test", providerID: "test", limit: { context: contextLimit } }],
-        }),
-      },
-    },
     storage: {
       get: async (key: string) => storage.get(key),
       set: async (key: string, value: unknown) => {
@@ -94,9 +86,6 @@ async function harness(
     cleanup,
     notices,
     events,
-    contextLimit: (limit: number) => {
-      contextLimit = limit
-    },
     foldAvailable: (available: boolean) => {
       foldAvailable = available
     },
@@ -399,55 +388,50 @@ test("pending peek returns captured media via ordinary tool file content", async
   expect(JSON.stringify((await host.request(messages)).messages)).toContain('"type":"media"')
 })
 
-test("context pressure nudges are transient, optional, and require fold to be available", async () => {
-  const usage = [
-    { type: "user", id: "u1" },
-    {
-      type: "assistant",
-      id: "a1",
-      model: { providerID: "test", id: "test" },
-      tokens: { input: 10_000, output: 1_000, reasoning: 0, cache: { read: 50_000, write: 0 } },
-    },
-  ]
+const reading = (id: string, input: number) => ({
+  type: "assistant",
+  id,
+  model: { providerID: "test", id: "test" },
+  tokens: { input, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+})
+const reminded = (event: SessionContextHook) =>
+  JSON.stringify(event.messages.at(-1)).includes("without a fold")
+
+test("growth nudges are transient, trailing, optional, and require fold to be available", async () => {
+  const grow = async (host: Awaited<ReturnType<typeof harness>>) => {
+    host.history([{ type: "user", id: "u1" }, reading("a1", 10_000)])
+    await host.request()
+    host.history([{ type: "user", id: "u1" }, reading("a2", 60_000)])
+    return host.request()
+  }
   const host = await harness()
-  host.history(usage)
-  expect((await host.request()).system[0].text).toContain("Context is growing")
-  expect((await host.request()).system).toEqual([])
-  expect((await host.request(original(), "s1", "compaction")).system).toEqual([])
+  const event = await grow(host)
+  expect(reminded(event)).toBe(true)
+  expect(event.messages.at(-1)?.role).toBe("user")
+  expect(event.system).toEqual([])
+  expect(reminded(await host.request())).toBe(false)
+  expect(reminded(await host.request(original(), "s1", "compaction"))).toBe(false)
   expect(host.storage.size).toBe(0)
   expect(host.notices).toEqual([])
 
-  const disabled = await harness(new Map(), { nudges: false })
-  disabled.history(usage)
-  expect((await disabled.request()).system).toEqual([])
+  expect(reminded(await grow(await harness(new Map(), { nudges: false })))).toBe(false)
+  expect(reminded(await grow(await harness(new Map(), { nudges: { every: 60_000 } })))).toBe(false)
+  expect(reminded(await grow(await harness(new Map(), { nudges: { every: 50_000 } })))).toBe(true)
   const unavailable = await harness()
-  unavailable.history(usage)
   unavailable.foldAvailable(false)
-  expect((await unavailable.request()).system).toEqual([])
-
-  const unknown = await harness()
-  unknown.history(usage)
-  unknown.contextLimit(0)
-  expect((await unknown.request()).system).toEqual([])
+  expect(reminded(await grow(unavailable))).toBe(false)
 })
 
 test("successful fold activation suppresses nudges based on the old context", async () => {
   const host = await harness()
+  host.history([{ type: "user", id: "u1" }, reading("a1", 10_000)])
   await host.request()
   await host.call("fold", firstInput, "f1")
-  host.history([
-    { type: "user", id: "u1" },
-    {
-      type: "assistant",
-      id: "current",
-      model: { providerID: "test", id: "test" },
-      tokens: { input: 90_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    },
-  ])
+  host.history([{ type: "user", id: "u1" }, reading("current", 90_000)])
   const event = await host.request(continuation(["f1"]))
   expect(JSON.stringify(event.messages)).toContain("[folded")
-  expect(event.system).toEqual([])
-  expect((await host.request(continuation(["f1"]))).system).toEqual([])
+  expect(reminded(event)).toBe(false)
+  expect(reminded(await host.request(continuation(["f1"])))).toBe(false)
 })
 
 test("unfold waits for its result, survives reload, keeps peek, and permits an identical refold", async () => {
