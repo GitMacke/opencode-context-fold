@@ -10,6 +10,9 @@
   compatibility with existing IDs.
 - Show a configurable TUI success toast after persisted fold activation,
   aggregating parallel folds and reporting their character reduction.
+- List active folds that compaction or other rewrites made undiscoverable in a
+  persisted notice at the end of the next request, so their archives stay
+  reachable through `peek`. Nested folds are covered through their outer fold.
 
 ## 0.1.0
 

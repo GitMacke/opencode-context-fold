@@ -258,6 +258,19 @@ archive contains the inner marker. Peeking the outer fold reveals the inner ID.
 Unfolding the outer fold restores the inner marker in place. If an unfold cannot
 find its complete marker, it returns an error without changing other folds.
 
+### Recovering lost folds
+
+Compaction, or another plugin rewriting history, can remove fold markers from
+the context. On each request the plugin checks that every active fold can still
+be found: its ID is visible (as a marker, in a checkpoint summary, or anywhere
+else), or it is nested inside a fold that can be found. Folds that fail this
+check are listed as `[folded ID] summary [/folded]` in a single notice at the
+end of that request, and saved to session history so later requests carry it
+unchanged. It does not start a model response of its own. Only the outermost
+lost folds are listed; the folds nested inside them remain reachable through
+their archives. Once the notice is visible, or folded like any other text, its
+folds count as found again, so it is not repeated unless it is also removed.
+
 ### Selection rules
 
 - Each anchor must match exactly once and come from one continuous block of
@@ -303,18 +316,18 @@ creating a duplicate. Forked sessions don't inherit folds.
   URIs or raw buffers) can be folded. URL references are refused rather than
   promising to retrieve a file that may have changed.
 - **Native compaction is a boundary.** New folds cannot cross or precede an
-  existing compaction checkpoint. The plugin asks the compaction model to keep
-  relevant fold IDs and summaries so the archives remain discoverable. That
-  model can still omit them. An archive can be retrieved by ID through `peek`,
-  but `unfold` cannot restore content behind a checkpoint.
+  existing compaction checkpoint, and `unfold` cannot restore content behind
+  one. The plugin asks the compaction model to keep relevant fold IDs and
+  summaries. Any fold whose ID is no longer reachable afterwards is listed in a
+  short notice at the end of the next request, so its archive stays retrievable
+  through `peek`.
 
 ## Future work
 
-Nested folds already let a session retain several levels of detail, but the
-structure is still tied to the conversation that produced it. Once native
-compaction introduces a checkpoint, earlier material cannot be reorganized in
-place. Archives remain accessible through `peek` if their IDs are known, but the
-checkpoint summary may omit the references needed to find them.
+Nested folds already let a session retain several levels of detail, and
+recovery notices keep archives discoverable across compaction, but the structure
+is still tied to the conversation that produced it. Once native compaction
+introduces a checkpoint, earlier material cannot be reorganized in place.
 
 A longer-term direction is to preserve a navigable memory across those
 boundaries: keep older subjects discoverable, retrieve just the relevant level

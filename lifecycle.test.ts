@@ -6,6 +6,7 @@ import {
   activateUnfolds,
   boundary,
   loadState,
+  orphans,
   planUnfold,
   project,
   readyFolds,
@@ -472,4 +473,42 @@ test("v2 storage migrates without losing folds, rewrites, or archives", () => {
   expect(migrated.unfolds).toEqual({})
   expect(render(project(messages, migrated).view)).toEqual(render(folded.view))
   expect(JSON.stringify(render(planUnfold(messages, migrated, folded.fold.id).view))).toContain(prose)
+})
+
+test("folds are orphaned only when nothing visible leads to them", () => {
+  const messages = [text("a", "Outer starts."), text("b", prose), text("c", "Outer ends."), user("u2")]
+  const inner = active(messages)
+  const outer = active(
+    messages,
+    { start: "Outer starts.", end: "Outer ends.", summary: "Resolved." },
+    inner.state,
+  )
+  expect(orphans(outer.view, outer.state)).toEqual([])
+  // Compaction replaced everything before u2; the outer archive still leads to the inner fold.
+  const compacted = project([user("u2")], outer.state).view
+  expect(orphans(compacted, outer.state).map((fold) => fold.id)).toEqual([outer.fold.id])
+  const unfolded = {
+    ...outer.state,
+    folds: outer.state.folds.map((fold) => ({ ...fold, status: "unfolded" as const })),
+  }
+  expect(orphans(compacted, unfolded)).toEqual([])
+})
+
+test("IDs preserved in a checkpoint summary keep folds discoverable", () => {
+  const folded = active([text("a", prose)])
+  const summary = (content: Message["content"][number]) =>
+    project([Message.make({ role: "assistant", content: [content] }), user("u2")], folded.state).view
+  const id = folded.fold.id
+  expect(
+    orphans(summary({ type: "compaction", provider: "test" as never, text: `See ${id}.` }), folded.state),
+  ).toEqual([])
+  expect(
+    orphans(
+      project([Message.make({ role: "user", content: `<summary>${id}</summary>` })], folded.state).view,
+      folded.state,
+    ),
+  ).toEqual([])
+  expect(
+    orphans(summary({ type: "compaction", provider: "test" as never, encrypted: "opaque" }), folded.state),
+  ).toHaveLength(1)
 })

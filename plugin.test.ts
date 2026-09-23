@@ -119,7 +119,7 @@ async function harness(
         agent: "build",
         model: { providerID, id: "test" },
         system: [],
-        tools: foldAvailable ? { fold: {} } : {},
+        tools: foldAvailable ? { fold: {}, peek: {}, unfold: {} } : {},
         messages,
         options: {},
       } as unknown as SessionContextHook
@@ -564,9 +564,62 @@ test("source changes after queuing an unfold produce one persistent notice and r
   expect(JSON.stringify((await host.request(messages)).messages)).toContain("Edited history")
   expect(host.notices).toHaveLength(1)
   expect(host.notices[0]).toContain("was not unfolded")
+  // OpenCode replays persisted synthetic notices as user messages.
+  messages.push(Message.make({ id: "notice", role: "user", content: host.notices[0] }))
   await host.request(messages)
   expect(host.notices).toHaveLength(1)
   expect((await host.call("peek", { id: fold.id }, "p1")).content).toContain(prose)
   const receipt = JSON.parse((await host.call("unfold", { id: fold.id }, "uf1")).content as string)
   expect(receipt.status).toBe("failed")
+})
+
+test("folds removed by compaction are surfaced once, and again only if the notice is lost", async () => {
+  const host = await harness()
+  await host.request()
+  const { id } = JSON.parse((await host.call("fold", firstInput, "f1")).content as string)
+  await host.request(continuation(["f1"]))
+  expect(host.notices).toEqual([])
+
+  const checkpoint = (n: number) =>
+    Message.make({
+      id: `c${n}`,
+      role: "user",
+      content: `<conversation-checkpoint>Summary ${n}</conversation-checkpoint>`,
+    })
+  const compacted = [checkpoint(1), Message.make({ id: "u3", role: "user", content: "Carry on" })]
+  const first = await host.request(compacted)
+  expect(host.notices).toHaveLength(1)
+  expect(host.notices[0]).toContain(`[folded ${id}] First finding. [/folded]`)
+  expect(first.messages.at(-1)?.content).toEqual([{ type: "text", text: host.notices[0] }])
+
+  const persisted = Message.make({ id: "syn1", role: "user", content: host.notices[0] })
+  await host.request([...compacted, persisted])
+  expect(host.notices).toHaveLength(1)
+
+  const recompacted = [checkpoint(2), Message.make({ id: "u4", role: "user", content: "Keep going" })]
+  await host.request(recompacted)
+  expect(host.notices).toHaveLength(2)
+
+  const withNotice = [...recompacted, Message.make({ id: "syn2", role: "user", content: host.notices[1] })]
+  await host.request(withNotice)
+  const folded = await host.call(
+    "fold",
+    { start: "[context-fold] Earlier", end: "First finding. [/folded]", summary: "Old research." },
+    "f2",
+  )
+  expect(JSON.parse(folded.content as string).status).toBe("pending")
+  const next = await host.request([
+    ...withNotice,
+    Message.make({
+      id: "current",
+      role: "assistant",
+      content: [{ type: "tool-call", id: "f2", name: "fold", input: {} }],
+    }),
+    Message.make({
+      role: "tool",
+      content: [{ type: "tool-result", id: "f2", name: "fold", result: { type: "text", value: "queued" } }],
+    }),
+  ])
+  expect(JSON.stringify(next.messages)).not.toContain("First finding")
+  expect(host.notices).toHaveLength(2)
 })

@@ -19,6 +19,7 @@ import {
   resetFrom,
   resetView,
   type View,
+  visibleText,
 } from "./core"
 
 export interface Expansion {
@@ -147,6 +148,36 @@ export function boundary(history: readonly unknown[]): Boundary {
     closed,
     completed: new Set(closed ? prior.slice(0, last + 1).map((item) => item.id) : []),
   }
+}
+
+// Active folds the model can no longer discover: neither their ID nor any
+// fold whose archive leads to them is visible, typically after compaction
+// dropped the markers. Returns the fewest folds whose archives reach all of
+// them, newest first, since outer folds are created after the folds inside.
+export function orphans(view: View, state: State, posted: readonly string[] = []): SavedFold[] {
+  const active = state.folds.filter((fold) => fold.status === "active")
+  const reached = new Set<string>()
+  const reach = (roots: SavedFold[]) => {
+    const queue = roots.filter((fold) => !reached.has(fold.id))
+    for (const fold of queue) reached.add(fold.id)
+    while (queue.length) {
+      const archive = queue.pop()!.original
+      for (const fold of active) {
+        if (reached.has(fold.id) || !archive.includes(fold.id)) continue
+        reached.add(fold.id)
+        queue.push(fold)
+      }
+    }
+  }
+  const visible = [visibleText(view), ...posted].join("\n")
+  reach(active.filter((fold) => visible.includes(fold.id)))
+  const lost: SavedFold[] = []
+  for (const fold of active.toReversed()) {
+    if (reached.has(fold.id)) continue
+    lost.push(fold)
+    reach([fold])
+  }
+  return lost.toReversed()
 }
 
 export function reserve(view: View, state: State): View {

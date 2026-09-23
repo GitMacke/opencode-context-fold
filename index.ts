@@ -4,7 +4,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import type { Message } from "@opencode/ai"
+import { Message } from "@opencode/ai"
 import { Plugin } from "@opencode/plugin"
 import {
   applyFold,
@@ -12,6 +12,7 @@ import {
   type FoldInput,
   foldStart,
   hasCheckpointAfter,
+  marker,
   prepareFold,
   render,
   sameFold,
@@ -24,6 +25,7 @@ import {
   type Boundary,
   boundary,
   loadState,
+  orphans,
   planUnfold,
   project,
   readyFolds,
@@ -33,7 +35,7 @@ import {
   type Unfold,
 } from "./lifecycle"
 import { type NudgeState, nudge } from "./nudge"
-import { foldDescription, peekDescription, unfoldDescription } from "./prompts"
+import { foldDescription, peekDescription, recoveryNotice, unfoldDescription } from "./prompts"
 import { ContextFoldRpc } from "./rpc"
 
 interface Runtime {
@@ -348,6 +350,20 @@ export default Plugin.define({
         const rewritten = await rewriteRequest(event.sessionID, runtime, before, turn)
         const { view, skipped } = rewritten
         event.messages = render(view)
+        // Surface folds whose markers were removed (e.g. by compaction) at the
+        // end of this request, and persist the notice so later requests carry
+        // it in the same position. Once visible, the IDs are no longer orphans.
+        // Error notices posted by this request already name their folds.
+        const lost = event.tools.peek ? orphans(view, runtime.state, rewritten.errors) : []
+        if (lost.length) {
+          const text = recoveryNotice(lost.map(marker))
+          event.messages.push(Message.make({ role: "user", content: text }))
+          try {
+            await ctx.session.synthetic({ sessionID: event.sessionID, text })
+          } catch (error) {
+            console.warn("context-fold: could not persist recovered fold notice", error)
+          }
+        }
         runtime.request = {
           messages: before,
           original: view,
@@ -390,6 +406,7 @@ export default Plugin.define({
                 error,
               })),
               skipped,
+              recovered: lost.map((fold) => fold.id),
               boundary: { turn: turn.turn, closed: turn.closed },
               resets: runtime.state.rewrites.map(({ reset }) => ({
                 retired: reset.retired.length,

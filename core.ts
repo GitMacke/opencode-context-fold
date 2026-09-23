@@ -124,6 +124,14 @@ function text(block: Block): string {
   return block.pieces.map((piece) => piece.text).join("")
 }
 
+// Everything the model can read, including checkpoint summaries that are not
+// selectable. Used to decide which fold IDs remain discoverable.
+export function visibleText(view: View): string {
+  return view
+    .map((block) => (block.part.type === "compaction" ? (block.part.text ?? "") : text(block)))
+    .join("\n")
+}
+
 export function viewChars(view: View): number {
   return view.reduce((total, block) => total + text(block).length, 0)
 }
@@ -324,7 +332,7 @@ export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
   }
 }
 
-function marker(fold: Pick<Fold, "id" | "summary">): string {
+export function marker(fold: Pick<Fold, "id" | "summary">): string {
   return `[folded ${fold.id}] ${fold.summary} [/folded]`
 }
 

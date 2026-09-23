@@ -25,3 +25,6 @@ After a successful call, the content returns on the next model request and stays
 export const softNudge = `Context is growing. Before moving into the next phase, use fold to summarize completed exploration and bulky results you have already understood. Keep conclusions, exact paths, constraints, and open questions; use peek later for details. Keep anything you still need verbatim, and continue normally if nothing is ready to fold.`
 
 export const strongNudge = `Context is approaching its limit. Before gathering substantial additional information, use fold on completed sections whose raw detail is no longer needed. Preserve conclusions, exact paths, constraints, uncertainties, and unfinished work. The originals remain available through peek. If no section can be usefully shortened yet, continue the task.`
+
+export const recoveryNotice = (markers: string[]) =>
+  `[context-fold] Earlier context containing these folds was removed. Their archives remain available through peek:\n${markers.join("\n")}`
