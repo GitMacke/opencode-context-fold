@@ -382,11 +382,11 @@ export default Plugin.define({
           current: reserve(view, runtime.state),
           turn: turn.turn,
         }
-        // Reminders go at the end of this request only, leaving the cached
-        // prefix untouched.
+        // Reminders are persisted like other notices so the model can later
+        // see what it was told; appended at the end, they keep the cached prefix.
         if (nudges.enabled && event.tools.fold) {
           const reminder = nudge(runtime.nudge, history, event.model, nudges.every, rewritten.folded)
-          if (reminder) event.messages.push(Message.make({ role: "user", content: reminder }))
+          if (reminder) await notify(event.sessionID, reminder, event.messages)
         }
         for (const id of skipped)
           console.warn(`context-fold: fold ${id} no longer matches the transcript and was skipped`)

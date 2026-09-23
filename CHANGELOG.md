@@ -14,8 +14,9 @@
   persisted notice at the end of the next request, so their archives stay
   reachable through `peek`. Nested folds are covered through their outer fold.
 - Replace the 60%/80% context-limit nudges with a reminder after every
-  `nudges.every` tokens (default 50,000) of growth without a fold, appended to
-  the end of the request instead of the system prompt to preserve the cache.
+  `nudges.every` tokens (default 50,000) of growth without a fold, saved as a
+  session notice at the end of the request instead of a temporary system
+  prompt addition, preserving the cache.
 - Exclude `fold` tool results from anchor matching, so a retry after a failed
   fold is not ambiguous with the echoed arguments.
 - Include activation and unfold error notices in the current request, and keep

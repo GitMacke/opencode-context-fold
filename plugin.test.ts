@@ -420,7 +420,7 @@ const reading = (id: string, input: number) => ({
 const reminded = (event: SessionContextHook) =>
   JSON.stringify(event.messages.at(-1)).includes("without a fold")
 
-test("growth nudges are transient, trailing, optional, and require fold to be available", async () => {
+test("growth nudges are persisted, trailing, optional, and require fold to be available", async () => {
   const grow = async (host: Awaited<ReturnType<typeof harness>>) => {
     host.history([{ type: "user", id: "u1" }, reading("a1", 10_000)])
     await host.request()
@@ -432,10 +432,11 @@ test("growth nudges are transient, trailing, optional, and require fold to be av
   expect(reminded(event)).toBe(true)
   expect(event.messages.at(-1)?.role).toBe("user")
   expect(event.system).toEqual([])
+  expect(host.notices).toHaveLength(1)
+  expect(event.messages.at(-1)?.content).toEqual([{ type: "text", text: host.notices[0] }])
   expect(reminded(await host.request())).toBe(false)
   expect(reminded(await host.request(original(), "s1", "compaction"))).toBe(false)
-  expect(host.storage.size).toBe(0)
-  expect(host.notices).toEqual([])
+  expect(host.notices).toHaveLength(1)
 
   expect(reminded(await grow(await harness(new Map(), { nudges: false })))).toBe(false)
   expect(reminded(await grow(await harness(new Map(), { nudges: { every: 60_000 } })))).toBe(false)

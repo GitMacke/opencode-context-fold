@@ -215,9 +215,10 @@ each one invalidates less of the provider's prompt cache.
 Reminders use the latest reported usage for the current model, including cached,
 output, and reasoning tokens. When the context has grown by `every` tokens since
 the reading after the last fold, a one-line reminder is appended as the final
-message of that request only. It is not saved in session history and leaves the
-cached prefix untouched. Each fold, compaction, or model switch restarts the
-interval, so a model that folds as it goes never sees a reminder. The reading
+message of that request and saved to session history, like the plugin's other
+notices, so the model can later see what it was told. Appended at the end, it
+leaves the cached prefix untouched. Each fold, compaction, or model switch
+restarts the interval, so a model that folds as it goes never sees a reminder. The reading
 measured before a newly activated fold is ignored. No tokenizer, extra model
 call, or context limit is needed, and reminders appear only on ordinary context
 requests where `fold` is available. Nudges never choose or fold content
