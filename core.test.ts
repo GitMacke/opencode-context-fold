@@ -211,6 +211,23 @@ describe("structured history", () => {
     expect(fold.original).toContain("shell tool-call")
   })
 
+  test("fold results echoing a quote do not make it ambiguous", () => {
+    const echo = (id: string) => [
+      message(`call-${id}`, "assistant", [{ type: "tool-call", id, name: "fold", input: input }]),
+      message(`result-${id}`, "tool", [
+        {
+          type: "tool-result",
+          id,
+          name: "fold",
+          result: { type: "text", value: `Invalid arguments: ${JSON.stringify(input)}` },
+        },
+      ]),
+    ]
+    const messages = [text("a", prose), ...echo("f1")]
+    const fold = prepareFold(createView(messages), input)
+    expect(fold.original).toContain("Details from the completed")
+  })
+
   test("splitting a tool pair returns an error, not a malformed request", () => {
     const messages = [text("start", "Episode starts here."), call("c1"), result("c1", `${prose} more output`)]
     expect(() => prepareFold(createView(messages), { ...input, start: "Episode starts here." })).toThrow(

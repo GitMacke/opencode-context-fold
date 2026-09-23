@@ -16,6 +16,10 @@
 - Replace the 60%/80% context-limit nudges with a reminder after every
   `nudges.every` tokens (default 50,000) of growth without a fold, appended to
   the end of the request instead of the system prompt to preserve the cache.
+- Exclude `fold` tool results from anchor matching, so a retry after a failed
+  fold is not ambiguous with the echoed arguments.
+- Include activation and unfold error notices in the current request, and keep
+  serving the request if a notice cannot be persisted.
 
 ## 0.1.0
 

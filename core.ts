@@ -175,7 +175,14 @@ function anchor(view: View, value: string, label: string): { start: Position; en
   const matches: { start: Position; end: Position; excerpt: string }[] = []
   view.forEach((block, index) => {
     // Anchors quote visible prose/results, never guessed tool JSON or reasoning.
-    if (block.opaque || block.part.type === "tool-call") return
+    // Fold results only echo a fold's own arguments, which would make retried
+    // quotes ambiguous.
+    if (
+      block.opaque ||
+      block.part.type === "tool-call" ||
+      (block.part.type === "tool-result" && block.part.name === "fold")
+    )
+      return
     const raw = text(block)
     for (let at = raw.indexOf(value); at !== -1; at = raw.indexOf(value, at + 1)) {
       matches.push({

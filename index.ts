@@ -142,6 +142,17 @@ export default Plugin.define({
       }),
     })
 
+    // Plugin notices are persisted so later requests carry them from history in
+    // the same position; `messages` also receives them for the current request.
+    async function notify(sessionID: string, text: string, messages?: Message[]) {
+      messages?.push(Message.make({ role: "user", content: text }))
+      try {
+        await ctx.session.synthetic({ sessionID, text })
+      } catch (error) {
+        console.warn("context-fold: could not persist notice", error)
+      }
+    }
+
     async function rewriteRequest(
       sessionID: string,
       runtime: Runtime,
@@ -181,10 +192,7 @@ export default Plugin.define({
             })
             .catch((error) => console.warn("context-fold: could not send fold notification", error))
         }
-        for (const error of errors) {
-          console.warn("context-fold:", error)
-          await ctx.session.synthetic({ sessionID, text: error })
-        }
+        for (const error of errors) console.warn("context-fold:", error)
       }
       return {
         view,
@@ -362,20 +370,12 @@ export default Plugin.define({
         const rewritten = await rewriteRequest(event.sessionID, runtime, before, turn)
         const { view, skipped } = rewritten
         event.messages = render(view)
+        for (const error of rewritten.errors) await notify(event.sessionID, error, event.messages)
         // Surface folds whose markers were removed (e.g. by compaction) at the
-        // end of this request, and persist the notice so later requests carry
-        // it in the same position. Once visible, the IDs are no longer orphans.
+        // end of this request. Once visible, the IDs are no longer orphans.
         // Error notices posted by this request already name their folds.
         const lost = event.tools.peek ? orphans(view, runtime.state, rewritten.errors) : []
-        if (lost.length) {
-          const text = recoveryNotice(lost.map(marker))
-          event.messages.push(Message.make({ role: "user", content: text }))
-          try {
-            await ctx.session.synthetic({ sessionID: event.sessionID, text })
-          } catch (error) {
-            console.warn("context-fold: could not persist recovered fold notice", error)
-          }
-        }
+        if (lost.length) await notify(event.sessionID, recoveryNotice(lost.map(marker)), event.messages)
         runtime.request = {
           messages: before,
           original: view,
@@ -432,6 +432,7 @@ export default Plugin.define({
         // request and can safely consume folds from a completed tool batch.
         const rewritten = await rewriteRequest(event.sessionID, runtime, event.messages)
         event.messages = render(rewritten.view)
+        for (const error of rewritten.errors) await notify(event.sessionID, error)
         if (runtime.state.folds.some((fold) => fold.status === "active")) {
           event.system.push({
             type: "text",

@@ -8,7 +8,7 @@ An [OpenCode v2](https://opencode.ai/v2) plugin that lets the model manage its o
 working context. It can replace a section of conversation with a summary using
 `fold`, consult the original with `peek`, or restore it for ongoing work with
 `unfold`. Replacing long stretches of history with short summaries substantially
-reduce the input tokens carried into each subsequent request. The recursive
+reduces the input tokens carried into each subsequent request. The recursive
 nature of this plugin allows for extremely long sessions with minimal information
 loss in a context efficient way.
 
@@ -78,7 +78,7 @@ restoring the section in place.
 
 ## Install
 
-Requires OpenCode V2. Tested against 2.0.3.
+Requires OpenCode V2. Tested against 2.0.11.
 
 ```sh
 opencode plugin add github:GitMacke/opencode-context-fold
@@ -280,8 +280,9 @@ folds count as found again, so it is not repeated unless it is also removed.
 ### Selection rules
 
 - Each anchor must match exactly once and come from one continuous block of
-  message text or tool output. Tool-call arguments are not searchable; whole
-  calls may still lie inside a range.
+  message text or tool output. Tool-call arguments and `fold` results are not
+  searchable, since a fold result only echoes a fold's own arguments; both may
+  still lie inside a range.
 - A range cannot cross a provider checkpoint (native compaction summary); the
   error quotes the text just before the checkpoint. A fold also can't be placed
   before an existing checkpoint. System messages inside a range are kept in

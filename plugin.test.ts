@@ -43,6 +43,7 @@ async function harness(
   const tools = new Map<string, Info>()
   const hooks = new Map<string, (event: SessionContextHook) => void | Promise<void>>()
   let failWrites = false
+  let failNotices = false
   let durable: unknown[] = [{ type: "user", id: "u1" }]
   const notices: string[] = []
   const events: { name: string; data: unknown }[] = []
@@ -74,6 +75,7 @@ async function harness(
     session: {
       context: async () => durable,
       synthetic: async ({ text }: { text: string }) => {
+        if (failNotices) throw new Error("Simulated notice failure")
         notices.push(text)
       },
       hook: async (name: string, callback: (event: SessionContextHook) => void | Promise<void>) => {
@@ -101,6 +103,9 @@ async function harness(
     },
     failWrites: (value: boolean) => {
       failWrites = value
+    },
+    failNotices: (value: boolean) => {
+      failNotices = value
     },
     async request(messages = original(), sessionID = "s1", kind = "context", providerID = "test") {
       const event = {
@@ -336,12 +341,30 @@ test("activation failure leaves original text and provides a persistent notice",
     Message.make({ id: "a1", role: "assistant", content: "Edited historical text" }),
     nextMessages()[2],
   ]
-  expect(JSON.stringify((await host.request(changed)).messages)).toContain("Edited historical text")
+  const event = await host.request(changed)
+  expect(JSON.stringify(event.messages)).toContain("Edited historical text")
   expect(host.notices).toHaveLength(1)
   expect(host.events).toHaveLength(0)
   expect(host.notices[0]).toContain("not applied")
+  expect(event.messages.at(-1)?.content).toEqual([{ type: "text", text: host.notices[0] }])
   await host.request(changed)
   expect(host.notices).toHaveLength(1)
+})
+
+test("a notice that cannot be persisted still reaches the current request", async () => {
+  const host = await harness()
+  await host.request()
+  await host.call("fold", firstInput, "f1")
+  host.finish()
+  host.failNotices(true)
+  const changed = [
+    original()[0],
+    Message.make({ id: "a1", role: "assistant", content: "Edited historical text" }),
+    nextMessages()[2],
+  ]
+  const event = await host.request(changed)
+  expect(JSON.stringify(event.messages.at(-1))).toContain("not applied")
+  expect(host.notices).toEqual([])
 })
 
 test("activation persists before changing the outgoing history; storage failure serves the previous view", async () => {
