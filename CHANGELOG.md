@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
+- Requires OpenCode 2.0.29 or newer. Stay on 0.1.1 for older versions.
 - Support OpenCode 2.0.29: load `@opencode/ai` for types only, since plugins
   may only use the host's `effect` and `@opencode/plugin` at runtime; adopt the
   `Media.Asset` media parts.
