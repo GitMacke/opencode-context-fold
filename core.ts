@@ -5,7 +5,8 @@
 // transcripts without re-searching quotes. Nothing here touches storage or
 // the plugin API.
 import { createHash } from "node:crypto"
-import { type ContentPart, Message } from "@opencode/ai"
+// Type-only: OpenCode only provides "effect" and "@opencode/plugin" to plugins at runtime.
+import type { ContentPart, Message } from "@opencode/ai"
 
 // Source offsets refer to immutable pieces, not offsets in the shrinking prompt.
 // A second fold can select an untouched suffix or an earlier fold's marker.
@@ -74,8 +75,12 @@ function hash(value: unknown): string {
 function partIdentity(part: ContentPart): unknown {
   const { providerMetadata: _, ...rest } = part as ContentPart & { providerMetadata?: unknown }
   if (rest.type !== "media") return rest
-  const { data, ...media } = rest
-  return { ...media, data: typeof data === "string" ? data : { bytes: data.byteLength } }
+  const { media, ...fields } = rest
+  const source =
+    media.source.type === "bytes"
+      ? { ...media.source, data: { bytes: media.source.data.byteLength } }
+      : media.source
+  return { ...fields, media: { source, mediaType: media.mediaType } }
 }
 
 function partText(part: ContentPart): string | undefined {
@@ -293,19 +298,22 @@ function selection(view: View, start: Position, end: Position) {
       .map((item) => (item.type === "text" ? item.text : `[attachment ${item.name ?? item.mime}]`))
       .join("\n\n"),
     archive,
-    chars: content.reduce((total, item) => total + item.text.length, 0),
+    chars:
+      content.reduce((total, item) => total + item.text.length, 0) +
+      archive.filter((item) => item.type === "file").length * MEDIA_CHARS,
   }
 }
 
+// Rough context cost of one image or attachment: ~1,000 tokens at ~4 chars per token.
+const MEDIA_CHARS = 4000
+
 function mediaFile(part: Extract<ContentPart, { type: "media" }>): ArchiveContent {
-  if (typeof part.data === "string" && /^(?:https?|file):/i.test(part.data)) {
-    throw new FoldError("Media must contain captured bytes, not an external reference.")
-  }
-  const data = typeof part.data === "string" ? part.data : Buffer.from(part.data).toString("base64")
+  const inline = part.media.inline()
+  if (!inline) throw new FoldError("Media must contain captured bytes, not an external reference.")
   return {
     type: "file",
-    uri: data.startsWith("data:") ? data : `data:${part.mediaType};base64,${data}`,
-    mime: part.mediaType,
+    uri: inline.dataUrl,
+    mime: inline.mime,
     ...(part.filename ? { name: part.filename } : {}),
   }
 }
@@ -323,7 +331,7 @@ export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
     .slice(0, 6)
   const removedChars = selected.chars - marker({ id, summary }).length
   const hasMedia = selected.archive.some((item) => item.type === "file")
-  if (removedChars <= 0 && !hasMedia)
+  if (removedChars <= 0)
     throw new FoldError(
       "Summary plus marker is not shorter than the selection. Fold a larger range or write a shorter summary.",
     )
@@ -334,7 +342,7 @@ export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
     end: last,
     digest: selected.digest,
     original: selected.original,
-    removedChars: Math.max(0, removedChars),
+    removedChars,
     ...(hasMedia ? { content: selected.archive } : {}),
   }
 }
@@ -403,7 +411,7 @@ export function render(view: View): Message[] {
     )
       return message
     const { native: _, ...rest } = message
-    return Message.make({ ...rest, providerMetadata: cleanMetadata(message.providerMetadata), content })
+    return { ...rest, providerMetadata: cleanMetadata(message.providerMetadata), content } as Message
   })
 }
 
@@ -415,7 +423,7 @@ export function render(view: View): Message[] {
 // fresh, rather than surviving and being rejected. The opaque payloads
 // themselves are never edited.
 //
-// Fields every @opencode/ai 2.0.3 protocol reads back from non-reasoning parts:
+// Fields every @opencode/ai 2.0.29 protocol reads back from non-reasoning parts:
 //   phase, type, status  open-responses message/part semantics
 //   result               anthropic server-tool result payload
 //   annotations          meta-responses citations
@@ -472,12 +480,13 @@ export function resetView(view: View, reset: Reset): View {
     cleaned = new Set(reset.cleaned)
   return view.flatMap((block): Block[] => {
     if (retired.has(block.key) && block.part.type === "reasoning") return []
-    if (!cleaned.has(block.key) || block.part.type === "compaction") return [block]
+    if (!cleaned.has(block.key) || block.part.type === "compaction" || block.part.type === "effort")
+      return [block]
     const { native: _, ...message } = block.message
     return [
       {
         ...block,
-        message: Message.make({ ...message, providerMetadata: cleanMetadata(message.providerMetadata) }),
+        message: { ...message, providerMetadata: cleanMetadata(message.providerMetadata) } as Message,
         part: { ...block.part, providerMetadata: cleanMetadata(block.part.providerMetadata) },
       },
     ]

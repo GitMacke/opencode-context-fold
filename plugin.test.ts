@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Message } from "@opencode/ai"
+import { Media, Message } from "@opencode/ai"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionContext as SessionContextHook } from "@opencode/plugin/promise/session"
 import type { Info, ToolContext } from "@opencode/plugin/promise/tool"
@@ -387,7 +387,7 @@ test("pending peek returns captured media via ordinary tool file content", async
   const messages = [
     original()[0],
     Message.assistant("Media episode starts."),
-    Message.user([{ type: "media", mediaType: "image/png", data: "iVBORw==", filename: "screen.png" }]),
+    Message.user([{ type: "media", media: Media.base64("iVBORw==", "image/png"), filename: "screen.png" }]),
     Message.assistant("Media episode ends."),
   ]
   await host.request(messages)

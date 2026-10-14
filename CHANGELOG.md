@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Support OpenCode 2.0.29: load `@opencode/ai` for types only, since plugins
+  may only use the host's `effect` and `@opencode/plugin` at runtime; adopt the
+  `Media.Asset` media parts.
+- Count each archived image or attachment as 4,000 characters when sizing a
+  fold, so small selections with images fold and report realistic savings.
 - Queue accepted folds and activate them before the next model request,
   including tool-driven continuations in the same user turn.
 - Activate parallel folds together after their tool results enter the model

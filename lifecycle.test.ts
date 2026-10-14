@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { Message } from "@opencode/ai"
+import { Media, Message } from "@opencode/ai"
 import { createView, prepareFold, render } from "./core"
 import {
   activate,
@@ -180,7 +180,7 @@ test("media archives round-trip captured bytes and are removed from the folded r
     Message.make({
       id: "img",
       role: "user",
-      content: [{ type: "media", mediaType: "image/png", data: bytes, filename: "screen.png" }],
+      content: [{ type: "media", media: Media.bytes(bytes, "image/png"), filename: "screen.png" }],
     }),
     text("b", "Screenshot episode ends."),
   ]
@@ -203,6 +203,25 @@ test("media archives round-trip captured bytes and are removed from the folded r
   )
   expect(JSON.stringify(render(active.view))).not.toContain('"type":"media"')
   expect(JSON.stringify(render(active.view))).toContain(fold.id)
+})
+
+test("media counts toward the fold size so short text around an image can be folded", () => {
+  const messages = [
+    text("a", "A"),
+    Message.make({
+      id: "img",
+      role: "user",
+      content: [{ type: "media", media: Media.base64("iVBORw==", "image/png") }],
+    }),
+    text("b", "B"),
+  ]
+  const fold = prepareFold(createView(messages), {
+    start: "A",
+    end: "B",
+    summary: "A summary much longer than the two letters of text in the selection.",
+  })
+  expect(fold.removedChars).toBeGreaterThan(3_900)
+  expect(fold.removedChars).toBeLessThan(4_000)
 })
 
 test("mixed tool attachments preserve the file in peek while retaining a valid result envelope", () => {
@@ -419,7 +438,7 @@ test("unfold restores tool pairs and media without resurrecting obsolete provide
     Message.make({
       id: "img",
       role: "user",
-      content: [{ type: "media", mediaType: "image/png", data: "iVBORw==" }],
+      content: [{ type: "media", media: Media.base64("iVBORw==", "image/png") }],
     }),
     text("b", input.end),
   ]
