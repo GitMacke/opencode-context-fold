@@ -175,9 +175,42 @@ function locate(view: View, point: Point, end: boolean): Position {
   throw new FoldError("Selection is no longer visible (overlap, edit, or compaction). Select a fresh range.")
 }
 
-function anchor(view: View, value: string, label: string): { start: Position; end: Position } {
+interface Match {
+  start: Position
+  end: Position
+  excerpt: string
+}
+
+const lt = (a: Position, b: Position) => a.block < b.block || (a.block === b.block && a.offset < b.offset)
+
+function unique(found: Match[], label: string, scope: string): Match {
+  if (found.length !== 1)
+    throw new FoldError(
+      `${label} has ${found.length} matches${scope}. Lengthen it to be unique. Examples: ${JSON.stringify(found.slice(0, 3).map((match) => match.excerpt))}`,
+    )
+  return found[0]
+}
+
+// Each anchor only needs to be unique where it could form a valid range: an
+// end after the start, or a start before the end.
+function anchors(view: View, input: { start: string; end: string }): { start: Position; end: Position } {
+  const starts = anchor(view, input.start, "start")
+  const ends = anchor(view, input.end, "end")
+  if (starts.length !== 1 && ends.length === 1) {
+    const end = ends[0].end
+    const valid = starts.filter((match) => lt(match.start, end))
+    if (!valid.length) throw new FoldError("end must follow start.")
+    return { start: unique(valid, "start", " before end").start, end }
+  }
+  const start = unique(starts, "start", "").start
+  const valid = ends.filter((match) => lt(start, match.end))
+  if (!valid.length) throw new FoldError("end must follow start.")
+  return { start, end: unique(valid, "end", ends.length > 1 ? " after start" : "").end }
+}
+
+function anchor(view: View, value: string, label: string): Match[] {
   if (!value.trim()) throw new FoldError(`${label} must contain non-whitespace text.`)
-  const matches: { start: Position; end: Position; excerpt: string }[] = []
+  const matches: Match[] = []
   view.forEach((block, index) => {
     // Anchors quote visible prose/results, never guessed tool JSON or reasoning.
     // Fold results only echo a fold's own arguments, which would make retried
@@ -201,11 +234,7 @@ function anchor(view: View, value: string, label: string): { start: Position; en
     throw new FoldError(
       `${label} quote not found. Copy an exact quote from message text or tool output already present before this response. Text you just wrote becomes selectable on the next model request.`,
     )
-  if (matches.length !== 1)
-    throw new FoldError(
-      `${label} has ${matches.length} matches. Lengthen it to be unique. Examples: ${JSON.stringify(matches.slice(0, 3).map((match) => match.excerpt))}`,
-    )
-  return matches[0]
+  return matches
 }
 
 function slicePieces(pieces: Piece[], from: number, to: number): Piece[] {
@@ -318,10 +347,30 @@ function mediaFile(part: Extract<ContentPart, { type: "media" }>): ArchiveConten
   }
 }
 
-export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
+// Models can't see where a tool result's raw text ends, so an end quoted from
+// inside the result of a call in the range means "through this result". It is
+// the only valid completion, so finish the result instead of rejecting it.
+function completeResult(view: View, start: Position, end: Position): { end: Position; extended?: string } {
+  const block = view[end.block]
+  const part = block.part
+  const length = text(block).length
+  if (part.type !== "tool-result" || end.offset >= length) return { end }
+  const call = view.findIndex(
+    (other, index) =>
+      index >= start.block &&
+      index < end.block &&
+      other.part.type === "tool-call" &&
+      other.part.id === part.id,
+  )
+  if (call === -1) return { end }
+  return { end: { block: end.block, offset: length }, extended: part.name }
+}
+
+export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold & { notice?: string } {
   if (!input.summary.trim()) throw new FoldError("summary must be non-empty.")
-  const start = anchor(view, input.start, "start").start
-  const end = anchor(view, input.end, "end").end
+  const anchored = anchors(view, input)
+  const start = anchored.start
+  const { end, extended } = completeResult(view, start, anchored.end)
   const selected = selection(view, start, end)
   const summary = input.summary.trim()
   const first = pointAt(view[start.block], start.offset, false)
@@ -344,6 +393,7 @@ export function prepareFold(view: View, input: FoldInput, attempt = 0): Fold {
     original: selected.original,
     removedChars,
     ...(hasMedia ? { content: selected.archive } : {}),
+    ...(extended ? { notice: `End extended to include the rest of ${extended}'s result.` } : {}),
   }
 }
 

@@ -288,7 +288,8 @@ folds count as found again, so it is not repeated unless it is also removed.
   error quotes the text just before the checkpoint. A fold also can't be placed
   before an existing checkpoint. System messages inside a range are kept in
   place and are not archived.
-- If a range includes a tool call, it must include that call's entire result.
+- If a range includes a tool call, it includes that call's entire result. An end
+  quoted from inside that result is extended to the end of the result.
   Folding only a result (leaving the call outside) is allowed; the result
   envelope is kept with the summary as its content.
 - The summary plus marker must be shorter than the selected text, unless the

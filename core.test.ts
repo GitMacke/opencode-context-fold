@@ -228,11 +228,65 @@ describe("structured history", () => {
     expect(fold.original).toContain("Details from the completed")
   })
 
-  test("splitting a tool pair returns an error, not a malformed request", () => {
-    const messages = [text("start", "Episode starts here."), call("c1"), result("c1", `${prose} more output`)]
-    expect(() => prepareFold(createView(messages), { ...input, start: "Episode starts here." })).toThrow(
-      "call/result pair",
+  test("an end inside the result of a call in the range extends through that result", () => {
+    const messages = [
+      text("start", "Episode starts here."),
+      call("c1"),
+      result("c1", `${prose} trailing output`),
+      text("after", "Work continues."),
+    ]
+    const view = createView(messages)
+    const fold = prepareFold(view, { ...input, start: "Episode starts here." })
+    expect(fold.notice).toContain("rest of")
+    expect(fold.original).toContain("trailing output")
+    const output = flatten(render(applyFold(view, fold)))
+    expect(output).not.toContain("trailing output")
+    expect(output).toContain("Work continues.")
+  })
+
+  test("splitting a call from a result outside the range is still an error", () => {
+    const messages = [
+      text("start", "Episode starts here."),
+      call("c1"),
+      text("x", "Gap text."),
+      result("c1", prose),
+    ]
+    expect(() =>
+      prepareFold(createView(messages), { ...input, start: "Episode starts here.", end: "Gap text." }),
+    ).toThrow("call/result pair")
+  })
+
+  test("anchors only need to be unique on the valid side of the other anchor", () => {
+    const repeated = "Repeated line."
+    const messages = [
+      text("a", repeated),
+      text("b", "Unique start."),
+      text("c", `Middle work. ${prose} ${repeated}`),
+      text("d", "Unique end."),
+      text("e", repeated),
+    ]
+    const view = createView(messages)
+    expect(() => prepareFold(view, { ...input, start: "Unique start.", end: repeated })).toThrow(
+      "2 matches after start",
     )
+    const tail = prepareFold(createView(messages.slice(0, 4)), {
+      ...input,
+      start: "Unique start.",
+      end: repeated,
+    })
+    expect(tail.original).toContain("Middle work.")
+    expect(tail.original).not.toContain("Unique end.")
+    const head = prepareFold(
+      createView([
+        text("a", "Unique start."),
+        text("b", `${repeated} ${prose}`),
+        text("c", "Unique end."),
+        text("d", repeated),
+      ]),
+      { ...input, start: repeated, end: "Unique end." },
+    )
+    expect(head.original).toContain("Investigation begins")
+    expect(head.original).not.toContain("Unique start.")
   })
 
   test("parallel results with calls outside the range retain all envelopes", () => {

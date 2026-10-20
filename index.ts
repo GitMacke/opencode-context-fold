@@ -241,8 +241,9 @@ export default Plugin.define({
               ) {
                 prepared = prepareFold(runtime.request.original, input as FoldInput, attempt)
               }
+              const { notice, ...rest } = prepared
               const fold: SavedFold = {
-                ...prepared,
+                ...rest,
                 status: "pending",
                 turn: runtime.request.turn,
                 messageID: tool.messageID,
@@ -262,7 +263,9 @@ export default Plugin.define({
               }
               await save(tool.sessionID, runtime, state)
               runtime.request.current = current
-              return receipt(fold)
+              const done = receipt(fold)
+              if (!notice) return done
+              return { content: JSON.stringify({ ...JSON.parse(done.content), notice }) }
             } catch (error) {
               if (!(error instanceof FoldError)) throw error
               return { content: JSON.stringify({ error: error.message }) }

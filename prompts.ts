@@ -8,9 +8,9 @@ Fold proactively during long tasks: after a substantial exploration, debugging a
 
 Preserve conclusions, exact paths and identifiers, user constraints, uncertainties, and unfinished work. Make the summary meaningfully shorter than the selected content. When folding earlier summaries, their IDs remain available in the archived content.
 
-Quote unique start and end anchors exactly from visible message text or tool output. The fold starts at the beginning of the start quote and ends at the end of the end quote. Each quote must come from one continuous block of text; do not stitch together separate messages or outputs. Do not use tool-call arguments, fold results, or private reasoning as anchors. If a quote is ambiguous, lengthen it.
+Quote start and end anchors exactly from visible message text or tool output. The fold starts at the beginning of the start quote and ends at the end of the end quote. The end only needs to be unique after the start (or the start unique before the end). Each quote must come from one continuous block of text; do not stitch together separate messages or outputs. Do not use tool-call arguments, fold results, or private reasoning as anchors. If a quote is ambiguous, lengthen it.
 
-For every tool call between the anchors, the selection must also contain that call's entire result. If your end quote cuts a result short, move it to the end of that result or later. You may fold just part of a tool result when its call is outside the selection. Ranges cannot cross a compaction checkpoint or select content before one. Correct invalid selections using the returned error.
+For every tool call between the anchors, the selection also contains that call's entire result; an end quoted from inside such a result extends to the end of it. You may fold just part of a tool result when its call is outside the selection. Ranges cannot cross a compaction checkpoint or select content before one. Correct invalid selections using the returned error.
 
 Independent, non-overlapping folds may run in parallel with each other and with other work. After a successful call, continue your task normally; you can retrieve omitted details with peek whenever needed.`
 
