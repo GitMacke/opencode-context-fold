@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.2
+
+- Make `@opencode/plugin` an optional peer dependency, since OpenCode provides
+  it at runtime. Installing the plugin no longer pulls in the OpenCode SDK
+  (about 270 packages and 174 MB).
+- Build notice messages as plain objects, so `@opencode/ai` is used for types
+  only.
+
+## 0.2.1
+
+- Check anchor uniqueness only within the valid range: the end anchor only
+  needs to be unique after the start, and the start only needs to be unique
+  before the end.
+- When an end anchor is quoted from inside a tool call's result, extend the
+  fold to the end of that result instead of rejecting the selection.
+
 ## 0.2.0
 
 - Requires OpenCode 2.0.29 or newer. Stay on 0.1.1 for older versions.

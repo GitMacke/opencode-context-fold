@@ -4,7 +4,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Message } from "@opencode/ai"
+import type { Message } from "@opencode/ai"
 import { Plugin } from "@opencode/plugin"
 import {
   applyFold,
@@ -145,7 +145,7 @@ export default Plugin.define({
     // Plugin notices are persisted so later requests carry them from history in
     // the same position; `messages` also receives them for the current request.
     async function notify(sessionID: string, text: string, messages?: Message[]) {
-      messages?.push(Message.make({ role: "user", content: text }))
+      messages?.push({ role: "user", content: [{ type: "text", text }] })
       try {
         await ctx.session.synthetic({ sessionID, text })
       } catch (error) {
